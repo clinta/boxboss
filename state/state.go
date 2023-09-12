@@ -1,3 +1,4 @@
+// Package state provides the State interface, and provides a base struct that can be embedded for implementing a boxboss state.
 package state
 
 import (
@@ -78,7 +79,8 @@ func (b *BaseState) setRunning(v bool) {
 	b.running.Store(v)
 }
 
-// Adds a trigger. Triggers are only processed if the state is not in one of the running states. Close stop channel to remove trigger.
+// AddTrigger adds a trigger that will cause the state to run
+// triggers are only processed if the state is not currently running
 func (b *BaseState) AddTrigger(trigger <-chan struct{}, stop <-chan struct{}) {
 	go func() {
 		for {
