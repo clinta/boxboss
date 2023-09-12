@@ -1,7 +1,6 @@
 package state
 
 import (
-	"sync"
 	"sync/atomic"
 )
 
@@ -41,10 +40,8 @@ type State interface {
 // TODO: Better name for this, this is to be embedded in actual state plugins
 // This embedding will implement everything needed for the State interface, except for check and run
 type BaseState struct {
-	status         atomic.Uint64
-	trigger        chan struct{}
-	listeners      []chan<- Status
-	listenersMutex sync.RWMutex
+	status  atomic.Uint64
+	trigger chan struct{}
 }
 
 // Status returns the current status for this state
@@ -55,11 +52,6 @@ func (b *BaseState) Status() Status {
 // setStatus sets the current status of this state, and dispatches all the listener channels
 func (b *BaseState) setStatus(v Status) {
 	b.status.Store(uint64(v))
-	b.listenersMutex.RLock()
-	for _, c := range b.listeners {
-		go func(c chan<- Status) { c <- v }(c)
-	}
-	b.listenersMutex.RUnlock()
 }
 
 // Adds a trigger. Triggers are only processed if the state is not in one of the running states. Close stop channel to remove trigger.
@@ -82,12 +74,6 @@ func (b *BaseState) AddTrigger(trigger <-chan struct{}, stop <-chan struct{}) {
 
 func (b *BaseState) getTrigger() <-chan struct{} {
 	return b.trigger
-}
-
-func (b *BaseState) AddListener(c chan<- Status) {
-	b.listenersMutex.Lock()
-	b.listeners = append(b.listeners, c)
-	b.listenersMutex.Unlock()
 }
 
 // ManageState listens for triggers and manages a state, should be launched in a goroutine
