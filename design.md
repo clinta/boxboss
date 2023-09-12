@@ -59,3 +59,28 @@ Contains interfaces for plugins
   * Build can dynamically insert the version number from a tag
   * A CI workflow can increment version numbers - tag then build
   * non-tagged can run last tag + timestamp?
+
+
+## Misc notes
+Role contains a number of states
+A state is an instance of a state plugin
+
+### State plugin interface
+* Builder()
+  * (plugin specific stuff, file name, mode ect...)
+  * Name - used for logging ect...
+  * Add Trigger - an event that triggers the state
+  * Add Requirement - something that must pass or the state will not run, gets inserted into precheck
+  * Add PreCheck() - function that is run before checking the state
+  * Add PostCheck() - function that is run after checking the state, regardless of whether or not changes are required
+  * Add PreRun() - function that is run before running the state, only run if the check indicated changes are needed
+  * Add PostRun() - function that is run after the check is run
+  * Add PostSuccess() - added to PostRun with condition on state
+  * Add PostFailure() - added to PostRun with condition on the state
+  * Build() - builds the state, spawns a goroutine waiting for triggers
+* Check() - checks if a change is needed
+* Run() - makes the change
+* Status() - Atomic access to a status
+* Events() - subscribes to a channel waiting for events from this state
+* SuccessEvents() - filtered subscription
+* FailureEvents() - filtered subscription
