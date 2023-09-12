@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,20 +11,41 @@ import (
 
 // State is any state that can be run
 type State interface {
+	// Check if the state needs to run, return true indicates that the run needs to run. Checks should not change anything on the machine
 	Check() (bool, error)
+	// Run the state, bring it into compliance
 	Run() (bool, error)
+
+	// provided by BaseState
 	// Error value from last run
 	LastError() error
 	// End timestamp of last run
 	LastRun() time.Time
 	// Whether or not the state made changes during it's last run
 	Changed() bool
-
-	// provided by BaseState
+	// Is this state currently running
 	Running() bool
+	// Add a trigger to trigger this state
+	AddTrigger(trigger <-chan struct{}, stop <-chan struct{})
+	// Add a condition, this state will not run, including checks, if this returns false or errors
+	AddCondition(f func() (bool, error))
+	// Add a PreCheck functions that runs before the checks. The state will not run if this returns an error, and errors will be propegated to LastError()
+	AddPreCheck(f func() error)
+	// Add a PostCheck function that runs after the checks, regardless of the check output. The state will not run if this returns an error, and errors will be propegated to LastError()
+	AddPostCheck(f func() error)
+	// Add a PreRun function that runs after the checks, and before the run. The state will not run if this returns an error, and errors will be propegated to LastError()
+	// PreRuns will not run if the Check did not indicate changes are required
+	AddPreRun(f func() error)
+	// Add a PostRun function that runs after the state run
+	AddPostRun(f func() error)
+	// Add a PostRun function that will run if the run fails
+	AddPostFailure(f func(error) error)
+	// Add a PostRun function that will run if the run succeeds
+	AddPostSuccess(f func() error)
+
 	setRunning(bool)
 	getTrigger() <-chan struct{}
-	preChecks() ([]func() error, func())
+	preChecks() ([]func() (bool, error), func())
 	postChecks() ([]func() error, func())
 	postRuns() ([]func() error, func())
 	setLastError(error)
@@ -41,7 +63,7 @@ type BaseState struct {
 	trigger         chan struct{}
 	running         atomic.Bool
 	preChecksMutex  sync.Mutex
-	preChecks_      []func() error
+	preChecks_      []func() (bool, error)
 	postChecksMutex sync.Mutex
 	postChecks_     []func() error
 	postRunsMutex   sync.Mutex
@@ -78,14 +100,18 @@ func (b *BaseState) getTrigger() <-chan struct{} {
 	return b.trigger
 }
 
-func (b *BaseState) AddPreCheck(f func() error) {
+func (b *BaseState) AddCondition(f func() (bool, error)) {
 	b.preChecksMutex.Lock()
 	b.preChecks_ = append(b.preChecks_, f)
 	b.preChecksMutex.Unlock()
 }
 
+func (b *BaseState) AddPreCheck(f func() error) {
+	b.AddCondition(func() (bool, error) { return true, f() })
+}
+
 // gets the preChecks slice, and the function to runlock when done reading it
-func (b *BaseState) preChecks() ([]func() error, func()) {
+func (b *BaseState) preChecks() ([]func() (bool, error), func()) {
 	b.preChecksMutex.Lock()
 	return b.preChecks_, b.preChecksMutex.Unlock
 }
@@ -134,14 +160,15 @@ func (b *BaseState) AddPostSuccess(f func() error) {
 	b.AddPostRun(f)
 }
 
-func (b *BaseState) AddPostFailure(f func() error) {
-	f = func() error {
-		if b.lastError == nil {
+func (b *BaseState) AddPostFailure(f func(error) error) {
+	prf := func() error {
+		err := b.LastError()
+		if err == nil {
 			return nil
 		}
-		return f()
+		return f(err)
 	}
-	b.AddPostRun(f)
+	b.AddPostRun(prf)
 }
 
 func (b *BaseState) setLastError(err error) {
@@ -188,12 +215,27 @@ func runState(s State) {
 	err := func() error {
 		{ // Run preChecks
 			g := new(errgroup.Group)
+			var errConditionNotMet = errors.New("condition not met")
 			preChecks, unlock := s.preChecks()
 			for _, f := range preChecks {
-				g.Go(f)
+				condF := func() error {
+					passed, err := f()
+					if err != nil {
+						return err
+					}
+					if !passed {
+						return errConditionNotMet
+					}
+					return nil
+				}
+				g.Go(condF)
 			}
 			unlock()
 			if err := g.Wait(); err != nil {
+				if errors.Is(err, errConditionNotMet) {
+					// TODO Log the condition is not met
+					return nil
+				}
 				return err
 			}
 		}
