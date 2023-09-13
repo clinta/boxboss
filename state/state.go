@@ -1,309 +1,303 @@
-// Package state provides the State interface, and provides a base struct that can be embedded for implementing a boxboss state.
+// Package state includes the state interface which should be implemented by plugins, and StateRunner which manages a state
 package state
 
 import (
+	"context"
 	"errors"
+	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
 
-// State is any state that can be run
+func init() {
+	// TODO this should be somewhere else
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+}
+
+// State interface is the interface that a state module must implement
 type State interface {
-	// Check if the state needs to run, return true indicates that the run needs to run. Checks should not change anything on the machine
-	Check() (bool, error)
-	// Run the state, bring it into compliance
-	Run() (bool, error)
-
-	// provided by BaseState
-	// Error value from last run
-	LastError() error
-	// End timestamp of last run
-	LastRun() time.Time
-	// Whether or not the state made changes during it's last run
-	Changed() bool
-	// Is this state currently running
-	Running() bool
-	// Add a trigger to trigger this state
-	AddTrigger(trigger <-chan struct{}, stop <-chan struct{})
-	// Add a condition, this state will not run, including checks, if this returns false or errors
-	AddCondition(f func() (bool, error))
-	// Add a PreCheck functions that runs before the checks. The state will not run if this returns an error, and errors will be propegated to LastError()
-	AddPreCheck(f func() error)
-	// Add a PostCheck function that runs after the checks, regardless of the check output. The state will not run if this returns an error, and errors will be propegated to LastError()
-	AddPostCheck(f func() error)
-	// Add a PreRun function that runs after the checks, and before the run. The state will not run if this returns an error, and errors will be propegated to LastError()
-	// PreRuns will not run if the Check did not indicate changes are required
-	AddPreRun(f func() error)
-	// Add a PostRun function that runs after the state run
-	AddPostRun(f func() error)
-	// Add a PostRun function that will run if the run fails
-	AddPostFailure(f func(error) error)
-	// Add a PostRun function that will run if the run succeeds
-	AddPostSuccess(f func() error)
-
-	setRunning(bool)
-	getTrigger() <-chan struct{}
-	preChecks() ([]func() (bool, error), func())
-	postChecks() ([]func() error, func())
-	postRuns() ([]func() error, func())
-	setLastError(error)
-	setLastRun(time.Time)
-	setChanged(bool)
+	// Check checks whether or not changes are necessary before running them
+	Check(context.Context) (bool, error)
+	// Run runs the states, making system modifications
+	Run(context.Context) (bool, error)
 }
 
-// BaseState provides the basic functionality for states, if embedded into a state, state only needs to implement Check() and Run()
-// TODO: Better name for this, this is to be embedded in actual state plugins
-// This embedding will implement everything needed for the State interface, except for check and run
-type BaseState struct {
-	lastError       error
-	lastRun         time.Time
-	changed         bool
-	trigger         chan struct{}
-	running         atomic.Bool
-	preChecksMutex  sync.Mutex
-	preChecks_      []func() (bool, error)
-	postChecksMutex sync.Mutex
-	postChecks_     []func() error
-	postRunsMutex   sync.Mutex
-	postRuns_       []func() error
+// StateRunner runs the state whenever a trigger is received
+type StateRunner struct {
+	state         State
+	trigger       chan context.Context
+	getLastResult chan chan<- *StateRunResult
+	addBeforeFunc chan *beforeFunc
+	addAfterFunc  chan *afterFunc
 }
 
-func (b *BaseState) Running() bool {
-	return b.running.Load()
+type StateRunResult struct {
+	changed   bool
+	completed time.Time
+	err       error
 }
 
-func (b *BaseState) setRunning(v bool) {
-	b.running.Store(v)
+// Apply will apply the state. If the state is already running, it will block until the existing state run is complete, then run again
+//
+// If multiple request to apply come in while the state is running, they will not all block until the net run completes, but the next run will
+// only run once. Errors from that application will be returned to all callers, but only the first callers context will be used.
+func (s *StateRunner) Apply(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.trigger <- ctx:
+		return s.Wait(ctx).err
+	}
 }
 
-// AddTrigger adds a trigger that will cause the state to run
-// triggers are only processed if the state is not currently running
-func (b *BaseState) AddTrigger(trigger <-chan struct{}, stop <-chan struct{}) {
-	go func() {
+// ApplyOnce will apply only if the state has not applied already, if state has already been applied, will return the last error
+//
+// ApplyOnce will block if the state is currently applying
+func (s *StateRunner) ApplyOnce(ctx context.Context) error {
+	res := s.Wait(ctx)
+	if res != StateNotRunResult {
+		return res.err
+	}
+	return s.Apply(ctx)
+}
+
+var ErrStateNotRun = errors.New("state has not yet run")
+var StateNotRunResult = &StateRunResult{false, time.Time{}, ErrStateNotRun}
+
+// Manage is the function that manages the state, runnning whenever a trigger is recieved
+//
+// Provided context can be used to stop
+func (s *StateRunner) manage(ctx context.Context) error {
+	lastResult := StateNotRunResult
+	beforeFuncs := make(map[*beforeFunc]struct{})
+	rmBeforeFunc := make(chan *beforeFunc)
+	afterFuncs := make(map[*afterFunc]struct{})
+	rmAfterFunc := make(chan *afterFunc)
+
+	for {
+		var triggerCtx context.Context
+		// wait for the first trigger to come in
+		select {
+		case <-ctx.Done():
+			for f := range beforeFuncs {
+				f.cancel()
+			}
+			for f := range afterFuncs {
+				f.cancel()
+			}
+			// consume all waiting removals, don't bother actually removing, they will be GCd
+			for {
+				select {
+				case <-rmBeforeFunc:
+					continue
+				case <-rmAfterFunc:
+					continue
+				default:
+					return ctx.Err()
+				}
+			}
+
+		case resCh := <-s.getLastResult:
+			resCh <- lastResult
+			continue
+
+		case f := <-s.addBeforeFunc:
+			go func() {
+				<-f.ctx.Done()
+				rmBeforeFunc <- f
+			}()
+			beforeFuncs[f] = struct{}{}
+			continue
+
+		case f := <-rmBeforeFunc:
+			delete(beforeFuncs, f)
+			continue
+
+		case f := <-s.addAfterFunc:
+			go func() {
+				<-f.ctx.Done()
+				rmAfterFunc <- f
+			}()
+			afterFuncs[f] = struct{}{}
+			continue
+
+		case f := <-rmAfterFunc:
+			delete(afterFuncs, f)
+			continue
+
+		case triggerCtx = <-s.trigger:
+		}
+
+		// collect all pending triggers
 		for {
 			select {
-			case <-trigger:
-				if b.Running() {
-					// TODO: Log ignoring trigger because state is running
-					continue
-				}
-				b.trigger <- struct{}{}
-			case <-stop:
-				return
+			case <-s.trigger:
+				continue
+			default:
 			}
+			break
 		}
-	}()
-}
 
-func (b *BaseState) getTrigger() <-chan struct{} {
-	return b.trigger
-}
-
-func (b *BaseState) AddCondition(f func() (bool, error)) {
-	b.preChecksMutex.Lock()
-	b.preChecks_ = append(b.preChecks_, f)
-	b.preChecksMutex.Unlock()
-}
-
-func (b *BaseState) AddPreCheck(f func() error) {
-	b.AddCondition(func() (bool, error) { return true, f() })
-}
-
-// gets the preChecks slice, and the function to runlock when done reading it
-func (b *BaseState) preChecks() ([]func() (bool, error), func()) {
-	b.preChecksMutex.Lock()
-	return b.preChecks_, b.preChecksMutex.Unlock
-}
-
-func (b *BaseState) AddPostCheck(f func() error) {
-	b.postChecksMutex.Lock()
-	b.postChecks_ = append(b.postChecks_, f)
-	b.postChecksMutex.Unlock()
-}
-
-// gets the postChecks slice, and the function to runlock when done reading it
-func (b *BaseState) postChecks() ([]func() error, func()) {
-	b.postChecksMutex.Lock()
-	return b.postChecks_, b.postChecksMutex.Unlock
-}
-
-func (b *BaseState) AddPreRun(f func() error) {
-	f = func() error {
-		if b.lastError != nil {
-			return nil
-		}
-		return f()
-	}
-	b.AddPostCheck(f)
-}
-
-func (b *BaseState) AddPostRun(f func() error) {
-	b.postRunsMutex.Lock()
-	b.postRuns_ = append(b.postRuns_, f)
-	b.postRunsMutex.Unlock()
-}
-
-// gets the postRuns slice, and the function to runlock when done reading it
-func (b *BaseState) postRuns() ([]func() error, func()) {
-	b.postRunsMutex.Lock()
-	return b.postRuns_, b.postRunsMutex.Unlock
-}
-
-func (b *BaseState) AddPostSuccess(f func() error) {
-	f = func() error {
-		if b.lastError != nil {
-			return nil
-		}
-		return f()
-	}
-	b.AddPostRun(f)
-}
-
-func (b *BaseState) AddPostFailure(f func(error) error) {
-	prf := func() error {
-		err := b.LastError()
-		if err == nil {
-			return nil
-		}
-		return f(err)
-	}
-	b.AddPostRun(prf)
-}
-
-func (b *BaseState) setLastError(err error) {
-	b.lastError = err
-}
-
-func (b *BaseState) LastError() error {
-	return b.lastError
-}
-
-func (b *BaseState) setLastRun(t time.Time) {
-	b.lastRun = t
-}
-
-func (b *BaseState) LastRun() time.Time {
-	return b.lastRun
-}
-
-func (b *BaseState) setChanged(v bool) {
-	b.changed = v
-}
-
-func (b *BaseState) Changed() bool {
-	return b.changed
-}
-
-// ManageState listens for triggers and manages a state, should be launched in a goroutine
-func ManageState(s State) {
-	go manageState(s)
-}
-
-func manageState(s State) {
-	for range s.getTrigger() {
-		runState(s)
-	}
-}
-
-func runState(s State) {
-	s.setRunning(true)
-	s.setLastError(nil)
-	defer s.setRunning(false)
-	defer s.setLastRun(time.Now())
-	s.setChanged(false)
-	err := func() error {
-		{ // Run preChecks
-			g := new(errgroup.Group)
-			var errConditionNotMet = errors.New("condition not met")
-			preChecks, unlock := s.preChecks()
-			for _, f := range preChecks {
-				condF := func() error {
-					passed, err := f()
-					if err != nil {
-						return err
-					}
-					if !passed {
-						return errConditionNotMet
-					}
-					return nil
-				}
-				g.Go(condF)
+		// TODO: run preFuncs
+		changed, err := func() (bool, error) {
+			bfg, bfCtx := errgroup.WithContext(triggerCtx)
+			for f := range beforeFuncs {
+				f := f
+				bfg.Go(func() error { return f.f(bfCtx) })
 			}
-			unlock()
-			if err := g.Wait(); err != nil {
-				if errors.Is(err, errConditionNotMet) {
-					// TODO Log the condition is not met
-					return nil
-				}
-				return err
-			}
-		}
-		{ // Run the check
-			check, err := s.Check()
+			err := bfg.Wait()
 			if err != nil {
-				return err
+				// TODO: add information into the context indicating that this error is from a beforeFunc
+				// TODO: Check for requirementnotmet which is not an error
+				return false, err
 			}
-			if !check {
-				return nil
-				// TODO Debug log, no changes required
-			}
-		}
-		{ // Run the postChecks
-			g := new(errgroup.Group)
-			postChecks, unlock := s.postChecks()
-			for _, f := range postChecks {
-				g.Go(f)
-			}
-			unlock()
-			if err := g.Wait(); err != nil {
-				return err
-			}
-		}
-		// Run the state
-		changed, err := s.Run()
-		s.setChanged(changed)
-		return err
-	}()
-	s.setLastError(err)
 
-	// Run the postRuns
-	err = func() error {
-		g := new(errgroup.Group)
-		postRuns, unlock := s.postRuns()
-		for _, f := range postRuns {
-			g.Go(f)
+			changeNeeded, err := s.state.Check(triggerCtx)
+			if err != nil {
+				// TODO: add information into context indicating that this error is from changes
+				return false, err
+			}
+
+			if !changeNeeded {
+				return false, nil
+			}
+
+			return s.state.Run(triggerCtx)
+			// TODO: Add information to context indicating that this error is from Run()
+		}()
+
+		lastResult = &StateRunResult{changed, time.Now(), err}
+
+		afwg := sync.WaitGroup{}
+		for f := range afterFuncs {
+			f := f
+			afwg.Add(1)
+			go func() { f.f(triggerCtx, err) }()
 		}
-		unlock()
-		if err := g.Wait(); err != nil {
+
+		// Return any waiting results before listening for new trigggers
+		for {
+			select {
+			case resCh := <-s.getLastResult:
+				resCh <- lastResult
+				continue
+			default:
+			}
+			break
+		}
+	}
+}
+
+func (s *StateRunner) Wait(ctx context.Context) *StateRunResult {
+	res := make(chan *StateRunResult)
+	select {
+	case s.getLastResult <- res:
+		return <-res
+	case <-ctx.Done():
+		return &StateRunResult{false, time.Time{}, ctx.Err()}
+	}
+}
+
+func (s *StateRunner) Running() bool {
+	res := make(chan *StateRunResult)
+	select {
+	case s.getLastResult <- res:
+		<-res
+		return true
+	default:
+		return false
+	}
+}
+
+// NewStateRunner creates the state runner that will run as long as the context is valid
+//
+// Do not attempt to use the state runner after the context is canceled, many operations will block forever
+func NewStateRunner(ctx context.Context, state State) *StateRunner {
+	s := &StateRunner{
+		state:         state,
+		trigger:       make(chan context.Context),
+		getLastResult: make(chan chan<- *StateRunResult),
+		addBeforeFunc: make(chan *beforeFunc),
+		addAfterFunc:  make(chan *afterFunc),
+	}
+	go s.manage(ctx)
+	return s
+}
+
+type beforeFunc struct {
+	ctx    context.Context
+	cancel func()
+	f      func(ctx context.Context) error
+}
+
+type afterFunc struct {
+	ctx    context.Context
+	cancel func()
+	f      func(ctx context.Context, err error)
+}
+
+// AddBeforeFunc adds a function that is run before the Check step of the Runner
+// If any PreChecks fail, the run will be canceled
+//
+// If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
+// Cancel the provided context to remove the function from the state runner
+func (s *StateRunner) AddBeforeFunc(ctx context.Context, f func(context.Context) error) {
+	ctx, cancel := context.WithCancel(ctx)
+	s.addBeforeFunc <- &beforeFunc{ctx, cancel, f}
+}
+
+// ErrConditionNotMet signals that a precheck condition was not met and the state should not run, but did not error in an unexpected way
+var ErrConditionNotMet = errors.New("PreCheck condition not met")
+
+// AddCondition adds a function that is a condition to determine whether or not Check should even run.
+// Cancel the provided context to remove the function from the state runner
+func (s *StateRunner) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error)) {
+	s.AddBeforeFunc(ctx, func(ctx context.Context) error {
+		v, err := f(ctx)
+		if err != nil {
 			return err
 		}
+		if !v {
+			return ErrConditionNotMet
+		}
 		return nil
-	}()
-
-	// Only use the postrun errors if the main run did not already set an error
-	if s.LastError() == nil && err != nil {
-		s.setLastError(err)
-	}
+	})
 }
 
-// Compiler checks to make sure the interface is properly implemented
-// TODO: Move this into a test
-
-type dummyState struct {
-	BaseState
+// AddAfterFunc adds a function that is run at the end of the Run. This may be after the Run step failed or succeeded, or after the Check step failed or succeeded,
+// or after any of the other Pre functions failed or succceeded.
+//
+// Cancel the provided context to remove the function from the state runner
+func (s *StateRunner) AddAfterFunc(ctx context.Context, f func(ctx context.Context, err error)) {
+	ctx, cancel := context.WithCancel(ctx)
+	s.addAfterFunc <- &afterFunc{ctx, cancel, f}
 }
 
-func (d *dummyState) Check() (bool, error) {
-	return false, nil
+func (s *StateRunner) AddAfterSuccess(ctx context.Context, f func(context.Context)) {
+	s.AddAfterFunc(ctx, func(ctx context.Context, err error) {
+		if err == nil {
+			f(ctx)
+		}
+	})
 }
 
-func (d *dummyState) Run() (bool, error) {
-	return false, nil
+func (s *StateRunner) AddAfterFailure(ctx context.Context, f func(ctx context.Context, err error)) {
+	s.AddAfterFunc(ctx, func(ctx context.Context, err error) {
+		if err != nil {
+			f(ctx, err)
+		}
+	})
 }
 
-var _ State = (*dummyState)(nil)
-
-//////
+// Run runs the StateRunner and returns a poitner to that can be used for
+// checking the running status, or triggering a state
+//
+// ctx can be used to stop the Runner.
+func (s *StateRunner) Run(ctx context.Context) {
+	go s.manage(ctx)
+}
