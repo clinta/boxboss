@@ -19,6 +19,10 @@ func (d *dummyState) Run(context.Context) (bool, error) {
 	return false, nil
 }
 
+func (d *dummyState) Name() string {
+	return "DummyState"
+}
+
 var _ State = (*dummyState)(nil)
 
 //////
