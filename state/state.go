@@ -123,14 +123,17 @@ func (s *StateRunner) manage() error {
 	log := log.With().Str("stateRunner", s.state.Name()).Logger()
 
 	for {
-		var triggerCtx context.Context
+		// triggerCtx will be Done if all trigger contexts are canceled
+		triggerCtx, triggerCancel := context.WithCancel(ctx)
+		triggerCtxWg := sync.WaitGroup{}
 		// wait for the first trigger to come in
 		select {
 		case <-ctx.Done():
 			log.Debug().Msg("shutting down runner")
 
 			// better for senders to panic than deadlock
-			// but that shouldn't happen anyway
+			// this should only happen if someone tries to use the StateRunner
+			// after they canceled ctx
 			close(s.trigger)
 			close(s.getLastResult)
 			close(s.addBeforeFunc)
@@ -190,16 +193,37 @@ func (s *StateRunner) manage() error {
 			delete(afterFuncs, f)
 			continue
 
-		case triggerCtx = <-s.trigger:
+		case tCtx := <-s.trigger:
+			triggerCtxWg.Add(1)
+			go func() {
+				select {
+				case <-tCtx.Done():
+				case <-triggerCtx.Done():
+				}
+				triggerCtxWg.Done()
+			}()
 			log.Debug().Msg("triggered")
 		}
 
 		// collect all pending triggers
 		for {
 			select {
-			case <-s.trigger:
+			case tCtx := <-s.trigger:
+				triggerCtxWg.Add(1)
+				go func() {
+					select {
+					case <-tCtx.Done():
+					case <-triggerCtx.Done():
+					}
+					triggerCtxWg.Done()
+				}()
 				continue
 			default:
+				go func() {
+					// cancel triggerCtx if all triggers contexts are canceled
+					triggerCtxWg.Wait()
+					triggerCancel()
+				}()
 			}
 			break
 		}
@@ -269,6 +293,10 @@ func (s *StateRunner) manage() error {
 			}
 			break
 		}
+
+		// done with triggerCtx
+		triggerCancel()
+		triggerCtxWg.Wait()
 	}
 }
 
