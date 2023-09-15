@@ -129,7 +129,8 @@ func (s *StateRunner) manage() error {
 		case <-ctx.Done():
 			log.Debug().Msg("shutting down runner")
 
-			// better to panic than deadlock
+			// better for senders to panic than deadlock
+			// but that shouldn't happen anyway
 			close(s.trigger)
 			close(s.getLastResult)
 			close(s.addBeforeFunc)
