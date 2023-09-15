@@ -33,6 +33,7 @@ type State interface {
 	Run(context.Context) (bool, error)
 }
 
+// BasicState is a simple implementation of the state interface
 type BasicState struct {
 	name  string
 	check func(context.Context) (bool, error)
@@ -51,6 +52,7 @@ func (b *BasicState) Run(ctx context.Context) (bool, error) {
 	return b.run(ctx)
 }
 
+// NewBasicState creates a new simple state
 func NewBasicState(name string, check func(context.Context) (bool, error), run func(context.Context) (bool, error)) State {
 	return &BasicState{
 		name:  name,
@@ -69,6 +71,7 @@ type StateRunner struct {
 	addAfterFunc  chan *afterFunc
 }
 
+// StateRunResult holds the result of a state run
 type StateRunResult struct {
 	changed   bool
 	completed time.Time
@@ -84,7 +87,7 @@ func (s *StateRunner) Apply(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case s.trigger <- ctx:
-		return s.Wait(ctx).err
+		return s.Result(ctx).err
 	}
 }
 
@@ -92,14 +95,17 @@ func (s *StateRunner) Apply(ctx context.Context) error {
 //
 // ApplyOnce will block if the state is currently applying
 func (s *StateRunner) ApplyOnce(ctx context.Context) error {
-	res := s.Wait(ctx)
+	res := s.Result(ctx)
 	if res != StateNotRunResult {
 		return res.err
 	}
 	return s.Apply(ctx)
 }
 
+// ErrStateNotRun is the error in the StateResult of a StateRunner that has not run yet
 var ErrStateNotRun = errors.New("state has not yet run")
+
+// StateNotRunResult is in the StateResult if the StateRunner has not yet run at all
 var StateNotRunResult = &StateRunResult{false, time.Time{}, ErrStateNotRun}
 
 // manage is the function that manages the state, runnning whenever a trigger is recieved
@@ -265,7 +271,10 @@ func (s *StateRunner) manage() error {
 	}
 }
 
-func (s *StateRunner) Wait(ctx context.Context) *StateRunResult {
+// Result gets the StateRunner result
+//
+// This will block if the state is currently running, unless ctx is canceled.
+func (s *StateRunner) Result(ctx context.Context) *StateRunResult {
 	res := make(chan *StateRunResult)
 	select {
 	case s.getLastResult <- res:
@@ -277,6 +286,7 @@ func (s *StateRunner) Wait(ctx context.Context) *StateRunResult {
 	}
 }
 
+// Running returns true if the state is currently running
 func (s *StateRunner) Running() bool {
 	res := make(chan *StateRunResult)
 	select {
@@ -288,7 +298,7 @@ func (s *StateRunner) Running() bool {
 	}
 }
 
-// NewStateRunner creates the state runner that will run as long as the context is valid
+// NewStateRunner creates the state runner that will run, listening for triggers from Apply until ctx is canceled
 //
 // Do not attempt to use the state runner after the context is canceled
 func NewStateRunner(ctx context.Context, state State) *StateRunner {
@@ -331,13 +341,17 @@ func wrapErrf(parent error, f func(context.Context) error) func(context.Context)
 	}
 }
 
+// ErrBeforeFunc is returned if a BeforeFunc fails causing the Apply to fail
 var ErrBeforeFunc = errors.New("before function failed")
 
 // AddBeforeFunc adds a function that is run before the Check step of the Runner
-// If any PreChecks fail, the run will be canceled
+// If any of these functions fail, the run will fail returning the first function that errored
 //
-// If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
-// Cancel the provided context to remove the function from the state runner
+// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//
+// # If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
+//
+// Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddBeforeFunc(ctx context.Context, name string, f func(context.Context) error) {
 	ctx, cancel := context.WithCancel(ctx)
 	select {
@@ -349,10 +363,17 @@ func (s *StateRunner) AddBeforeFunc(ctx context.Context, name string, f func(con
 
 // ErrConditionNotMet signals that a precheck condition was not met and the state should not run, but did not error in an unexpected way
 var ErrConditionNotMet = errors.New("condition not met")
+
+// ErrConditionFunc is returned by the state when a Condition failed
+//
+// This will be wrapped in an ErrBeforeFunc, use errors.Is to check for this error.
 var ErrConditionFunc = errors.New("condition function failed")
 
-// AddCondition adds a function that is a condition to determine whether or not Check should even run.
-// Cancel the provided context to remove the function from the state runner
+// AddCondition adds a function that is a condition to determine whether or not Check should run.
+//
+// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//
+// Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddCondition(ctx context.Context, name string, f func(context.Context) (conditionMet bool, err error)) {
 	bf := func(ctx context.Context) error {
 		v, err := f(ctx)
@@ -370,7 +391,9 @@ func (s *StateRunner) AddCondition(ctx context.Context, name string, f func(cont
 // AddAfterFunc adds a function that is run at the end of the Run. This may be after the Run step failed or succeeded, or after the Check step failed or succeeded,
 // or after any of the other Pre functions failed or succceeded.
 //
-// Cancel the provided context to remove the function from the state runner
+// The provided function should check the provided context so that it can exit early if the runner is stopped. The err provided to the function is the error returned from the Run.
+//
+// Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterFunc(ctx context.Context, name string, f func(ctx context.Context, err error)) {
 	ctx, cancel := context.WithCancel(ctx)
 	select {
@@ -380,6 +403,11 @@ func (s *StateRunner) AddAfterFunc(ctx context.Context, name string, f func(ctx 
 	}
 }
 
+// AddAfterSuccess adds a function that is run after a successful state run.
+//
+// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//
+// Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(context.Context)) {
 	s.AddAfterFunc(ctx, "afterSuccess: "+name, func(ctx context.Context, err error) {
 		if err == nil {
@@ -388,6 +416,11 @@ func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(c
 	})
 }
 
+// AddAfterFailure adds a function that is run after a failed state run.
+//
+// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//
+// Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterFailure(ctx context.Context, name string, f func(ctx context.Context, err error)) {
 	s.AddAfterFunc(ctx, "afterFailure: "+name, func(ctx context.Context, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
@@ -396,8 +429,15 @@ func (s *StateRunner) AddAfterFailure(ctx context.Context, name string, f func(c
 	})
 }
 
+// ErrDependancyFailed is returned by the state when a dependency failed
+//
+// This will be wrapped in an ErrBeforeFunc, use errors.Is to check for this error.
 var ErrDependancyFailed = errors.New("dependency failed")
 
+// DependOn makes s dependent on d. If s.Apply is called, this will make sure that d.Apply has been called at least once.
+//
+// d may fail and it will prevent s from running.
+// if d.Apply is run again later, it will not automatically trigger s. To do so, see TriggerOn
 func (s *StateRunner) DependOn(ctx context.Context, d *StateRunner) {
 	f := wrapErrf(ErrDependancyFailed, d.ApplyOnce)
 	s.AddBeforeFunc(ctx, "dependancy: "+d.state.Name(), f)
