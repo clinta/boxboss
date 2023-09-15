@@ -78,6 +78,18 @@ type StateRunResult struct {
 	err       error
 }
 
+func (r *StateRunResult) Changed() bool {
+	return r.changed
+}
+
+func (r *StateRunResult) Completed() time.Time {
+	return r.completed
+}
+
+func (r *StateRunResult) Err() error {
+	return r.err
+}
+
 // Apply will apply the state. If the state is already running, it will block until the existing state run is complete, then run again
 //
 // If multiple request to apply come in while the state is running, they will not all block until the net run completes, but the next run will
@@ -107,6 +119,8 @@ var ErrStateNotRun = errors.New("state has not yet run")
 
 // StateNotRunResult is in the StateResult if the StateRunner has not yet run at all
 var StateNotRunResult = &StateRunResult{false, time.Time{}, ErrStateNotRun}
+
+var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
 // manage is the function that manages the state, runnning whenever a trigger is recieved
 //
@@ -254,13 +268,17 @@ func (s *StateRunner) manage() error {
 			}
 
 			if !changeNeeded {
-				log.Debug().Msg("check indicates no changes required")
+				log.Debug().Msg(checkChangesButNoRunChanges)
 				return false, nil
 			}
 
 			log.Debug().Msg("running")
 			changed, err := s.state.Run(triggerCtx)
 			err = wrapErr(ErrRunFailed, err)
+
+			if !changed {
+				log.Warn().Msg("check indicated changes were required, but run did not report changes")
+			}
 
 			log = log.With().Bool("changed", changed).Logger()
 			if err != nil {
