@@ -354,11 +354,13 @@ var ErrBeforeFunc = errors.New("before function failed")
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddBeforeFunc(ctx context.Context, name string, f func(context.Context) error) {
 	ctx, cancel := context.WithCancel(ctx)
-	select {
-	case s.addBeforeFunc <- &beforeFunc{ctx, name, cancel, wrapErrf(ErrBeforeFunc, f)}:
-	case <-ctx.Done():
-	case <-s.ctx.Done():
-	}
+	go func() {
+		select {
+		case s.addBeforeFunc <- &beforeFunc{ctx, name, cancel, wrapErrf(ErrBeforeFunc, f)}:
+		case <-ctx.Done():
+		case <-s.ctx.Done():
+		}
+	}()
 }
 
 // ErrConditionNotMet signals that a precheck condition was not met and the state should not run, but did not error in an unexpected way
@@ -396,11 +398,13 @@ func (s *StateRunner) AddCondition(ctx context.Context, name string, f func(cont
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterFunc(ctx context.Context, name string, f func(ctx context.Context, err error)) {
 	ctx, cancel := context.WithCancel(ctx)
-	select {
-	case s.addAfterFunc <- &afterFunc{ctx, name, cancel, f}:
-	case <-ctx.Done():
-	case <-s.ctx.Done():
-	}
+	go func() {
+		select {
+		case s.addAfterFunc <- &afterFunc{ctx, name, cancel, f}:
+		case <-ctx.Done():
+		case <-s.ctx.Done():
+		}
+	}()
 }
 
 // AddAfterSuccess adds a function that is run after a successful state run.
