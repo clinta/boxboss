@@ -268,7 +268,7 @@ func (s *StateRunner) manage() error {
 			}
 
 			if !changeNeeded {
-				log.Debug().Msg(checkChangesButNoRunChanges)
+				log.Debug().Msg("check indicates no changes required")
 				return false, nil
 			}
 
@@ -277,7 +277,7 @@ func (s *StateRunner) manage() error {
 			err = wrapErr(ErrRunFailed, err)
 
 			if !changed {
-				log.Warn().Msg("check indicated changes were required, but run did not report changes")
+				log.Warn().Msg(checkChangesButNoRunChanges)
 			}
 
 			log = log.With().Bool("changed", changed).Logger()
