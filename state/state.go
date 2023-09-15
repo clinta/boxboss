@@ -418,5 +418,5 @@ func (s *StateRunner) TriggerOn(ctx context.Context, t *StateRunner, cb func(err
 	f := func(ctx context.Context) {
 		cb(s.Apply(ctx))
 	}
-	t.AddAfterSuccess(ctx, "triggerOn: "+s.state.Name(), f)
+	t.AddAfterSuccess(ctx, "triggering: "+s.state.Name(), f)
 }
