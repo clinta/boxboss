@@ -347,7 +347,7 @@ var ErrBeforeFunc = errors.New("before function failed")
 // AddBeforeFunc adds a function that is run before the Check step of the Runner
 // If any of these functions fail, the run will fail returning the first function that errored
 //
-// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // # If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
 //
@@ -371,7 +371,7 @@ var ErrConditionFunc = errors.New("condition function failed")
 
 // AddCondition adds a function that is a condition to determine whether or not Check should run.
 //
-// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddCondition(ctx context.Context, name string, f func(context.Context) (conditionMet bool, err error)) {
@@ -405,7 +405,7 @@ func (s *StateRunner) AddAfterFunc(ctx context.Context, name string, f func(ctx 
 
 // AddAfterSuccess adds a function that is run after a successful state run.
 //
-// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(context.Context)) {
@@ -418,7 +418,7 @@ func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(c
 
 // AddAfterFailure adds a function that is run after a failed state run.
 //
-// # The provided function should check the provided context so that it can exit early if the runner is stopped
+//	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterFailure(ctx context.Context, name string, f func(ctx context.Context, err error)) {
