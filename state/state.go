@@ -130,6 +130,7 @@ func (s *StateRunner) manage() error {
 		select {
 		case <-ctx.Done():
 			log.Debug().Msg("shutting down runner")
+			triggerCancel()
 
 			// better for senders to panic than deadlock
 			// this should only happen if someone tries to use the StateRunner
