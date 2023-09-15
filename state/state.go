@@ -424,7 +424,9 @@ func (s *StateRunner) AddCondition(ctx context.Context, name string, f func(cont
 //
 // The provided function should check the provided context so that it can exit early if the runner is stopped. The err provided to the function is the error returned from the Run.
 //
-// Cancel ctx to remove the function from the state runner
+// Cancel ctx to remove the function from the state runner.
+//
+// AfterFuncs do not block returning the StateContext result. This means that a subsequent state run could run the AfterFunc before the previous one finished.
 func (s *StateRunner) AddAfterFunc(ctx context.Context, name string, f func(ctx context.Context, err error)) {
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
