@@ -104,7 +104,9 @@ var StateNotRunResult = &StateRunResult{false, time.Time{}, ErrStateNotRun}
 
 // manage is the function that manages the state, runnning whenever a trigger is recieved
 //
-// Provided context can be used to stop
+// # Provided context can be used to stop
+//
+// TODO: Add rate limiting
 func (s *StateRunner) manage() error {
 	ctx := s.ctx
 	lastResult := StateNotRunResult
@@ -112,7 +114,7 @@ func (s *StateRunner) manage() error {
 	rmBeforeFunc := make(chan *beforeFunc)
 	afterFuncs := make(map[*afterFunc]struct{})
 	rmAfterFunc := make(chan *afterFunc)
-	log := log.With().Str("state", s.state.Name()).Logger()
+	log := log.With().Str("stateRunner", s.state.Name()).Logger()
 
 	for {
 		var triggerCtx context.Context
@@ -132,38 +134,57 @@ func (s *StateRunner) manage() error {
 			continue
 
 		case f := <-s.addBeforeFunc:
+			log := log.With().Str("beforeFunc", f.name).Logger()
+			log.Debug().Msg("adding beforeFunc")
 			go func() {
 				select {
 				case <-ctx.Done():
 					return
 				case <-f.ctx.Done():
 				}
-				rmBeforeFunc <- f
+
+				select {
+				case <-ctx.Done():
+					return
+				case rmBeforeFunc <- f:
+				}
 			}()
 			beforeFuncs[f] = struct{}{}
 			continue
 
 		case f := <-rmBeforeFunc:
+			log := log.With().Str("beforeFunc", f.name).Logger()
+			log.Debug().Msg("removing beforeFunc")
 			delete(beforeFuncs, f)
 			continue
 
 		case f := <-s.addAfterFunc:
+			log := log.With().Str("afterFunc", f.name).Logger()
+			log.Debug().Msg("adding afterFunc")
 			go func() {
 				select {
 				case <-ctx.Done():
 					return
 				case <-f.ctx.Done():
 				}
-				rmAfterFunc <- f
+
+				select {
+				case <-ctx.Done():
+					return
+				case rmAfterFunc <- f:
+				}
 			}()
 			afterFuncs[f] = struct{}{}
 			continue
 
 		case f := <-rmAfterFunc:
+			log := log.With().Str("afterFunc", f.name).Logger()
+			log.Debug().Msg("removing afterFunc")
 			delete(afterFuncs, f)
 			continue
 
 		case triggerCtx = <-s.trigger:
+			log.Debug().Msg("triggered")
 		}
 
 		// collect all pending triggers
@@ -180,27 +201,40 @@ func (s *StateRunner) manage() error {
 			bfg, bfCtx := errgroup.WithContext(triggerCtx)
 			for f := range beforeFuncs {
 				f := f
-				bfg.Go(func() error { return f.f(bfCtx) })
+				bfg.Go(func() error {
+					log := log.With().Str("beforeFunc", f.name).Logger()
+					log.Debug().Msg("running beforeFunc")
+					err := f.f(bfCtx)
+					return err
+				})
 			}
 			err := bfg.Wait()
 			if err != nil {
-				// TODO: add information into the context indicating that this error is from a beforeFunc
-				// TODO: Check for requirementnotmet which is not an error
+				log.Err(err)
 				return false, err
 			}
 
+			log.Debug().Msg("running check")
 			changeNeeded, err := s.state.Check(triggerCtx)
 			if err != nil {
-				// TODO: add information into context indicating that this error is from changes
+				log.Err(err)
 				return false, errors.Join(ErrCheckFailed, err)
 			}
 
 			if !changeNeeded {
+				log.Debug().Msg("check indicates no changes required")
 				return false, nil
 			}
 
+			log.Debug().Msg("running")
 			changed, err := s.state.Run(triggerCtx)
 			err = wrapErr(ErrRunFailed, err)
+
+			log = log.With().Bool("changed", changed).Logger()
+			if err != nil {
+				log.Err(err)
+			}
+
 			return changed, err
 			// TODO: Add information to context indicating that this error is from Run()
 		}()
@@ -211,7 +245,11 @@ func (s *StateRunner) manage() error {
 		for f := range afterFuncs {
 			f := f
 			afwg.Add(1)
-			go func() { f.f(triggerCtx, err) }()
+			go func() {
+				log := log.With().Str("afterFunc", f.name).Logger()
+				log.Debug().Msg("running afterFunc")
+				f.f(triggerCtx, err)
+			}()
 		}
 
 		// Return any waiting results before listening for new trigggers
@@ -252,7 +290,7 @@ func (s *StateRunner) Running() bool {
 
 // NewStateRunner creates the state runner that will run as long as the context is valid
 //
-// Do not attempt to use the state runner after the context is canceled, many operations will block forever
+// Do not attempt to use the state runner after the context is canceled
 func NewStateRunner(ctx context.Context, state State) *StateRunner {
 	s := &StateRunner{
 		state:         state,
@@ -268,12 +306,14 @@ func NewStateRunner(ctx context.Context, state State) *StateRunner {
 
 type beforeFunc struct {
 	ctx    context.Context
+	name   string
 	cancel func()
 	f      func(ctx context.Context) error
 }
 
 type afterFunc struct {
 	ctx    context.Context
+	name   string
 	cancel func()
 	f      func(ctx context.Context, err error)
 }
@@ -298,11 +338,10 @@ var ErrBeforeFunc = errors.New("before function failed")
 //
 // If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
 // Cancel the provided context to remove the function from the state runner
-func (s *StateRunner) AddBeforeFunc(ctx context.Context, f func(context.Context) error) {
+func (s *StateRunner) AddBeforeFunc(ctx context.Context, name string, f func(context.Context) error) {
 	ctx, cancel := context.WithCancel(ctx)
-	log.With().Str("funcType", "beforeFunc").Logger().WithContext(ctx)
 	select {
-	case s.addBeforeFunc <- &beforeFunc{ctx, cancel, wrapErrf(ErrBeforeFunc, f)}:
+	case s.addBeforeFunc <- &beforeFunc{ctx, name, cancel, wrapErrf(ErrBeforeFunc, f)}:
 	case <-ctx.Done():
 	case <-s.ctx.Done():
 	}
@@ -314,7 +353,7 @@ var ErrConditionFunc = errors.New("condition function failed")
 
 // AddCondition adds a function that is a condition to determine whether or not Check should even run.
 // Cancel the provided context to remove the function from the state runner
-func (s *StateRunner) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error)) {
+func (s *StateRunner) AddCondition(ctx context.Context, name string, f func(context.Context) (conditionMet bool, err error)) {
 	bf := func(ctx context.Context) error {
 		v, err := f(ctx)
 		if err != nil {
@@ -325,32 +364,32 @@ func (s *StateRunner) AddCondition(ctx context.Context, f func(context.Context) 
 		}
 		return nil
 	}
-	s.AddBeforeFunc(ctx, wrapErrf(ErrConditionFunc, bf))
+	s.AddBeforeFunc(ctx, "condition: "+name, wrapErrf(ErrConditionFunc, bf))
 }
 
 // AddAfterFunc adds a function that is run at the end of the Run. This may be after the Run step failed or succeeded, or after the Check step failed or succeeded,
 // or after any of the other Pre functions failed or succceeded.
 //
 // Cancel the provided context to remove the function from the state runner
-func (s *StateRunner) AddAfterFunc(ctx context.Context, f func(ctx context.Context, err error)) {
+func (s *StateRunner) AddAfterFunc(ctx context.Context, name string, f func(ctx context.Context, err error)) {
 	ctx, cancel := context.WithCancel(ctx)
 	select {
-	case s.addAfterFunc <- &afterFunc{ctx, cancel, f}:
+	case s.addAfterFunc <- &afterFunc{ctx, name, cancel, f}:
 	case <-ctx.Done():
 	case <-s.ctx.Done():
 	}
 }
 
-func (s *StateRunner) AddAfterSuccess(ctx context.Context, f func(context.Context)) {
-	s.AddAfterFunc(ctx, func(ctx context.Context, err error) {
+func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(context.Context)) {
+	s.AddAfterFunc(ctx, "afterSuccess: "+name, func(ctx context.Context, err error) {
 		if err == nil {
 			f(ctx)
 		}
 	})
 }
 
-func (s *StateRunner) AddAfterFailure(ctx context.Context, f func(ctx context.Context, err error)) {
-	s.AddAfterFunc(ctx, func(ctx context.Context, err error) {
+func (s *StateRunner) AddAfterFailure(ctx context.Context, name string, f func(ctx context.Context, err error)) {
+	s.AddAfterFunc(ctx, "afterFailure: "+name, func(ctx context.Context, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
 			f(ctx, err)
 		}
@@ -361,7 +400,7 @@ var ErrDependancyFailed = errors.New("dependency failed")
 
 func (s *StateRunner) DependOn(ctx context.Context, d *StateRunner) {
 	f := wrapErrf(ErrDependancyFailed, d.ApplyOnce)
-	s.AddBeforeFunc(ctx, f)
+	s.AddBeforeFunc(ctx, "dependancy: "+d.state.Name(), f)
 }
 
 func LogErr(err error) {
@@ -379,7 +418,5 @@ func (s *StateRunner) TriggerOn(ctx context.Context, t *StateRunner, cb func(err
 	f := func(ctx context.Context) {
 		cb(s.Apply(ctx))
 	}
-	t.AddAfterSuccess(ctx, f)
+	t.AddAfterSuccess(ctx, "triggerOn: "+s.state.Name(), f)
 }
-
-// TODO - add dependencies, dependants requirements ect... use systemd as a model
