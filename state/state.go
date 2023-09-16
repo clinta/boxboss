@@ -141,7 +141,7 @@ func (s *StateRunner) manage() error {
 	for {
 		// triggerCtx will be Done if all trigger contexts are canceled
 		triggerCtx, triggerCancel := context.WithCancel(s.ctx)
-		triggerCtxWg := sync.WaitGroup{}
+		triggerWg := sync.WaitGroup{}
 		// wait for the first trigger to come in
 		select {
 		case <-s.ctx.Done():
@@ -215,13 +215,13 @@ func (s *StateRunner) manage() error {
 			continue
 
 		case tCtx := <-s.trigger:
-			triggerCtxWg.Add(1)
+			triggerWg.Add(1)
 			go func() {
 				select {
 				case <-tCtx.Done():
 				case <-triggerCtx.Done():
 				}
-				triggerCtxWg.Done()
+				triggerWg.Done()
 			}()
 			log.Debug().Msg("triggered")
 		}
@@ -230,19 +230,19 @@ func (s *StateRunner) manage() error {
 		for {
 			select {
 			case tCtx := <-s.trigger:
-				triggerCtxWg.Add(1)
+				triggerWg.Add(1)
 				go func() {
 					select {
 					case <-tCtx.Done():
 					case <-triggerCtx.Done():
 					}
-					triggerCtxWg.Done()
+					triggerWg.Done()
 				}()
 				continue
 			default:
 				go func() {
 					// cancel triggerCtx if all triggers contexts are canceled
-					triggerCtxWg.Wait()
+					triggerWg.Wait()
 					triggerCancel()
 				}()
 			}
@@ -342,7 +342,7 @@ func (s *StateRunner) manage() error {
 
 		// done with triggerCtx
 		triggerCancel()
-		triggerCtxWg.Wait()
+		triggerWg.Wait()
 	}
 }
 

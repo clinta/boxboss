@@ -127,6 +127,37 @@ func TestCheckTrueRunTrue(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
+func TestCheckTrueRunTrueTwice(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	state.retCheckChanges = true
+	state.retRunChanges = true
+
+	assert.Zero(state.checks, "should not check before apply was called")
+	assert.Nil(runner.Apply(ctx))
+	assert.Equal(len(state.checks), 1)
+	assert.Equal(len(state.runs), 1)
+	res := runner.Result(ctx)
+	assert.True(res.Changed())
+	assert.Nil(res.Err())
+	assert.NotZero(res.Completed())
+	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
+	assert.True(res.Completed().After(state.runs[0]), "runner should have completed after run function")
+
+	assert.Nil(runner.Apply(ctx))
+	assert.Equal(len(state.checks), 2)
+	assert.Equal(len(state.runs), 2)
+	res = runner.Result(ctx)
+	assert.True(res.Changed())
+	assert.Nil(res.Err())
+	assert.NotZero(res.Completed())
+	assert.True(state.checks[1].Before(state.runs[1]), "should have checked before run")
+	assert.True(res.Completed().After(state.runs[1]), "runner should have completed after run function")
+
+	cancel()
+	goleak.VerifyNone(t)
+}
+
 func TestBeforeCheckFail(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
@@ -194,3 +225,8 @@ func TestBeforeCheckRemove(t *testing.T) {
 	cancel()
 	goleak.VerifyNone(t)
 }
+
+//TODO
+// Test canceling a trigger
+// Test canceling only one of two triggers
+// Test canceling two triggers
