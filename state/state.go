@@ -458,13 +458,11 @@ var ErrBeforeCheckHook = errors.New("beforeCheckHook failed")
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddBeforeCheckHook(ctx context.Context, name string, f func(context.Context) error) {
 	ctx, cancel := context.WithCancel(ctx)
-	go func() {
-		select {
-		case s.addBeforeCheckHook <- &beforeCheckHook{ctx, name, cancel, wrapErrf(ErrBeforeCheckHook, f)}:
-		case <-ctx.Done():
-		case <-s.ctx.Done():
-		}
-	}()
+	select {
+	case s.addBeforeCheckHook <- &beforeCheckHook{ctx, name, cancel, wrapErrf(ErrBeforeCheckHook, f)}:
+	case <-ctx.Done():
+	case <-s.ctx.Done():
+	}
 }
 
 // ErrConditionNotMet signals that a precheck condition was not met and the state should not run, but did not error in an unexpected way
@@ -505,21 +503,19 @@ var ErrAfterCheckHook = errors.New("before function failed")
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterCheckHook(ctx context.Context, name string, f func(ctx context.Context, changeNeeded bool, err error) error) {
 	ctx, cancel := context.WithCancel(ctx)
-	go func() {
-		select {
-		case s.addAfterCheckHook <- &afterCheckHook{
-			ctx,
-			name,
-			cancel,
-			func(ctx context.Context, changeNeeded bool, err error) error {
-				err = f(ctx, changeNeeded, err)
-				return wrapErr(ErrAfterCheckHook, err)
-			},
-		}:
-		case <-ctx.Done():
-		case <-s.ctx.Done():
-		}
-	}()
+	select {
+	case s.addAfterCheckHook <- &afterCheckHook{
+		ctx,
+		name,
+		cancel,
+		func(ctx context.Context, changeNeeded bool, err error) error {
+			err = f(ctx, changeNeeded, err)
+			return wrapErr(ErrAfterCheckHook, err)
+		},
+	}:
+	case <-ctx.Done():
+	case <-s.ctx.Done():
+	}
 }
 
 // AddChangesRequiredHook adds a function that is run after the check step, if changes are required
