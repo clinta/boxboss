@@ -466,8 +466,8 @@ func (s *StateRunner) AddBeforeCheckHook(name string, f func(context.Context) er
 		name:    name,
 		f:       wrapErrf(ErrBeforeCheckHook, f),
 	}:
-	case <-ctx.Done():
 	case <-s.ctx.Done():
+		removed()
 	}
 	return func() {
 		remove()
@@ -524,8 +524,8 @@ func (s *StateRunner) AddAfterCheckHook(name string, f func(ctx context.Context,
 			return wrapErr(ErrAfterCheckHook, err)
 		},
 	}:
-	case <-ctx.Done():
 	case <-s.ctx.Done():
+		removed()
 	}
 	return func() {
 		remove()
@@ -562,8 +562,8 @@ func (s *StateRunner) AddAfterRunHook(name string, f func(ctx context.Context, e
 			name:    name,
 			f:       f,
 		}:
-		case <-ctx.Done():
 		case <-s.ctx.Done():
+			removed()
 		}
 	}()
 	return func() {
