@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,24 +30,54 @@ func newCatchLog(level zerolog.Level, msg string) *catchLog {
 	return h
 }
 
+type testState struct {
+	name            string
+	checks          []time.Time
+	runs            []time.Time
+	check           func(ctx context.Context) (bool, error)
+	run             func(ctx context.Context) (bool, error)
+	retCheckChanges bool
+	retCheckErr     error
+	retRunChanges   bool
+	retRunErr       error
+}
+
+func (t *testState) Check(ctx context.Context) (bool, error) {
+	t.checks = append(t.checks, time.Now())
+	return t.check(ctx)
+}
+
+func (t *testState) Run(ctx context.Context) (bool, error) {
+	t.runs = append(t.runs, time.Now())
+	return t.run(ctx)
+}
+
+func (t *testState) Name() string {
+	return t.name
+}
+
+func newTestRunner() (context.Context, func(), *testState, *StateRunner) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &testState{
+		name: "testState",
+	}
+	t.check = func(ctx context.Context) (bool, error) {
+		return t.retCheckChanges, t.retCheckErr
+	}
+	t.run = func(ctx context.Context) (bool, error) {
+		return t.retRunChanges, t.retRunErr
+	}
+	return ctx, cancel, t, NewStateRunner(ctx, t)
+}
+
 func TestCheckFalse(t *testing.T) {
 	assert := assert.New(t)
-	checked := time.Time{}
+	ctx, cancel, state, runner := newTestRunner()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	check := func(ctx context.Context) (bool, error) {
-		checked = time.Now()
-		return false, nil
-	}
-	run := func(ctx context.Context) (bool, error) {
-		assert.FailNow("check returned false, should not run")
-		return false, nil
-	}
-	runner := NewStateRunner(ctx, NewBasicState("test", check, run))
-
-	assert.Zero(checked, "should not check before apply was called")
+	assert.Zero(state.checks, "should not check before apply was called")
 	assert.Nil(runner.Apply(ctx))
-	assert.NotZero(checked, "check should have run after apply")
+	assert.Equal(len(state.checks), 1, "check should have run after apply")
+	assert.Zero(state.runs, "should not have run")
 	res := runner.Result(ctx)
 	assert.False(res.Changed())
 	assert.Nil(res.Err())
@@ -58,34 +89,81 @@ func TestCheckFalse(t *testing.T) {
 func TestCheckTrueRunFalse(t *testing.T) {
 	assert := assert.New(t)
 	h := newCatchLog(zerolog.WarnLevel, checkChangesButNoRunChanges)
-	checked := time.Time{}
-	ran := time.Time{}
+	ctx, cancel, state, runner := newTestRunner()
+	state.retCheckChanges = true
 
-	ctx, cancel := context.WithCancel(context.Background())
-	check := func(ctx context.Context) (bool, error) {
-		checked = time.Now()
-		assert.Zero(ran, "run should have not already run while check is running")
-		return true, nil
-	}
-	run := func(ctx context.Context) (bool, error) {
-		ran = time.Now()
-		assert.NotZero(checked, "check should have run already")
-		assert.True(ran.After(checked), "should have checked before run")
-		return false, nil
-	}
-	runner := NewStateRunner(ctx, NewBasicState("test", check, run))
-
-	assert.Zero(checked, "should not check before apply was called")
+	assert.Zero(state.checks, "should not check before apply was called")
 	assert.Nil(runner.Apply(ctx))
-	assert.NotZero(ran, "should have run after apply")
+	assert.Equal(len(state.checks), 1)
+	assert.Equal(len(state.runs), 1)
 	assert.Equal(h.count, 1, "did not get a warn log for check indicating changes but no changes made")
 	res := runner.Result(ctx)
 	assert.False(res.Changed())
 	assert.Nil(res.Err())
 	assert.NotZero(res.Completed())
-	assert.True(res.Completed().After(ran), "runner should have completed after run function")
+	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
+	assert.True(res.Completed().After(state.runs[0]), "runner should have completed after run function")
 	cancel()
 	goleak.VerifyNone(t)
 }
 
-//TODO we need pre-change functions. Like maybe if check returns true, then we need to stop a service before editing a file
+func TestCheckTrueRunTrue(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	state.retCheckChanges = true
+	state.retRunChanges = true
+
+	assert.Zero(state.checks, "should not check before apply was called")
+	assert.Nil(runner.Apply(ctx))
+	assert.Equal(len(state.checks), 1)
+	assert.Equal(len(state.runs), 1)
+	res := runner.Result(ctx)
+	assert.True(res.Changed())
+	assert.Nil(res.Err())
+	assert.NotZero(res.Completed())
+	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
+	assert.True(res.Completed().After(state.runs[0]), "runner should have completed after run function")
+	cancel()
+	goleak.VerifyNone(t)
+}
+
+func TestBeforeCheckFail(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	state.retCheckChanges = true
+	state.retRunChanges = true
+
+	var bfErr = errors.New("testBeforeCheckHookErr")
+	runner.AddBeforeCheckHook(ctx, "testBeforeCheckHook", func(ctx context.Context) error {
+		return bfErr
+	})
+	assert.ErrorIs(runner.Apply(ctx), bfErr)
+	res := runner.Result(ctx)
+	assert.False(res.Changed())
+	assert.ErrorIs(res.Err(), bfErr)
+	assert.NotZero(res.Completed())
+	assert.Zero(state.checks)
+	assert.Zero(state.runs)
+	cancel()
+	goleak.VerifyNone(t)
+}
+
+func TestBeforeCheckSucceed(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	beforeHookTime := time.Time{}
+
+	runner.AddBeforeCheckHook(ctx, "testBeforeCheckHook", func(ctx context.Context) error {
+		beforeHookTime = time.Now()
+		return nil
+	})
+	assert.Nil(runner.Apply(ctx))
+	res := runner.Result(ctx)
+	assert.False(res.Changed())
+	assert.Nil(res.Err())
+	assert.NotZero(res.Completed())
+	assert.True(beforeHookTime.Before(state.checks[0]))
+	assert.Zero(state.runs)
+	cancel()
+	goleak.VerifyNone(t)
+}
