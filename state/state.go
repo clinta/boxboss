@@ -301,7 +301,7 @@ func (s *StateRunner) manage() error {
 				acfg.Go(func() error {
 					log := log.With().Str("afterCheckHook", f.name).Logger()
 					log.Debug().Msg("running afterCheckHook")
-					err := f.f(acfCtx, err)
+					err := f.f(acfCtx, changeNeeded, err)
 					return err
 				})
 			}
@@ -422,7 +422,7 @@ type afterCheckHook struct {
 	ctx    context.Context
 	name   string
 	cancel func()
-	f      func(ctx context.Context, err error) error
+	f      func(ctx context.Context, changeNeeded bool, err error) error
 }
 
 type afterRunHook struct {
@@ -503,7 +503,7 @@ var ErrAfterCheckHook = errors.New("before function failed")
 //	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
-func (s *StateRunner) AddAfterCheckHook(ctx context.Context, name string, f func(context.Context, error) error) {
+func (s *StateRunner) AddAfterCheckHook(ctx context.Context, name string, f func(ctx context.Context, changeNeeded bool, err error) error) {
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
 		select {
@@ -511,8 +511,8 @@ func (s *StateRunner) AddAfterCheckHook(ctx context.Context, name string, f func
 			ctx,
 			name,
 			cancel,
-			func(ctx context.Context, err error) error {
-				err = f(ctx, err)
+			func(ctx context.Context, changeNeeded bool, err error) error {
+				err = f(ctx, changeNeeded, err)
 				return wrapErr(ErrAfterCheckHook, err)
 			},
 		}:
@@ -522,9 +522,14 @@ func (s *StateRunner) AddAfterCheckHook(ctx context.Context, name string, f func
 	}()
 }
 
-// AddChangesRequired adds a function that is run after the check step, if changes are required
-func (s *StateRunner) AddChangesRequired(ctx context.Context, name string, f func(context.Context, error) error) {
-	s.AddAfterCheckHook(ctx, "changesRequired: "+name, f)
+// AddChangesRequiredHook adds a function that is run after the check step, if changes are required
+func (s *StateRunner) AddChangesRequiredHook(ctx context.Context, name string, f func(context.Context) error) {
+	s.AddAfterCheckHook(ctx, "changesRequired: "+name, func(ctx context.Context, changeNeeded bool, err error) error {
+		if changeNeeded && err == nil {
+			return f(ctx)
+		}
+		return err
+	})
 }
 
 // AddAfterRunHook adds a function that is run at the end of the Run. This may be after the Run step failed or succeeded, or after the Check step failed or succeeded,
@@ -546,12 +551,12 @@ func (s *StateRunner) AddAfterRunHook(ctx context.Context, name string, f func(c
 	}()
 }
 
-// AddAfterSuccess adds a function that is run after a successful state run.
+// AddAfterSuccessHook adds a function that is run after a successful state run.
 //
 //	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
-func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(context.Context)) {
+func (s *StateRunner) AddAfterSuccessHook(ctx context.Context, name string, f func(context.Context)) {
 	s.AddAfterRunHook(ctx, "afterSuccess: "+name, func(ctx context.Context, err error) {
 		if err == nil {
 			f(ctx)
@@ -559,12 +564,12 @@ func (s *StateRunner) AddAfterSuccess(ctx context.Context, name string, f func(c
 	})
 }
 
-// AddAfterFailure adds a function that is run after a failed state run.
+// AddAfterFailureHook adds a function that is run after a failed state run.
 //
 //	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
-func (s *StateRunner) AddAfterFailure(ctx context.Context, name string, f func(ctx context.Context, err error)) {
+func (s *StateRunner) AddAfterFailureHook(ctx context.Context, name string, f func(ctx context.Context, err error)) {
 	s.AddAfterRunHook(ctx, "afterFailure: "+name, func(ctx context.Context, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
 			f(ctx, err)
@@ -594,12 +599,20 @@ func DiscardErr(error) {
 	//noop
 }
 
-// TriggerOn causes this state to be applied whenever the triggering state succeeds
+// TriggerOnSuccess causes this state to be applied whenever the triggering state succeeds
 //
 // cb is a callback to handle the result. Use LogErr to simply log the error, or DiscardErr to do nothing
-func (s *StateRunner) TriggerOn(ctx context.Context, t *StateRunner, cb func(error)) {
+func (s *StateRunner) TriggerOnSuccess(ctx context.Context, t *StateRunner, cb func(error)) {
 	f := func(ctx context.Context) {
 		cb(s.Apply(ctx))
 	}
-	t.AddAfterSuccess(ctx, "triggering: "+s.state.Name(), f)
+	t.AddAfterSuccessHook(ctx, "triggering: "+s.state.Name(), f)
+}
+
+// BlockOn prevents s from running while t is running
+func (s *StateRunner) BlockOn(ctx context.Context, t *StateRunner) {
+	s.AddBeforeCheckHook(ctx, "blockOn: "+t.state.Name(), func(ctx context.Context) error {
+		t.Result(ctx)
+		return nil
+	})
 }
