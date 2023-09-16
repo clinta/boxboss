@@ -147,18 +147,6 @@ func (s *StateRunner) manage() error {
 		case <-s.ctx.Done():
 			log.Debug().Msg("shutting down runner")
 			triggerCancel()
-
-			// better for senders to panic than deadlock
-			// this should only happen if someone tries to use the StateRunner
-			// after they canceled ctx
-			close(s.trigger)
-			close(s.getLastResult)
-			close(s.addBeforeCheckHook)
-			close(rmBeforeCheckHook)
-			close(s.addAfterCheckHook)
-			close(rmAfterCheckHook)
-			close(s.addAfterRunHook)
-			close(rmAfterRunHook)
 			return s.ctx.Err()
 		case resCh := <-s.getLastResult:
 			resCh <- lastResult
