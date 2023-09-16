@@ -129,7 +129,6 @@ var checkChangesButNoRunChanges = "check indicated changes were required, but ru
 //
 // TODO: Add rate limiting
 func (s *StateRunner) manage() error {
-	ctx := s.ctx
 	lastResult := StateNotRunResult
 	beforeCheckHooks := make(map[*beforeCheckHook]struct{})
 	rmBeforeCheckHook := make(chan *beforeCheckHook)
@@ -141,11 +140,11 @@ func (s *StateRunner) manage() error {
 
 	for {
 		// triggerCtx will be Done if all trigger contexts are canceled
-		triggerCtx, triggerCancel := context.WithCancel(ctx)
+		triggerCtx, triggerCancel := context.WithCancel(s.ctx)
 		triggerCtxWg := sync.WaitGroup{}
 		// wait for the first trigger to come in
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			log.Debug().Msg("shutting down runner")
 			triggerCancel()
 
@@ -155,8 +154,12 @@ func (s *StateRunner) manage() error {
 			close(s.trigger)
 			close(s.getLastResult)
 			close(s.addBeforeCheckHook)
+			close(rmBeforeCheckHook)
+			close(s.addAfterCheckHook)
+			close(rmAfterCheckHook)
 			close(s.addAfterRunHook)
-			return ctx.Err()
+			close(rmAfterRunHook)
+			return s.ctx.Err()
 		case resCh := <-s.getLastResult:
 			resCh <- lastResult
 			continue
@@ -165,15 +168,11 @@ func (s *StateRunner) manage() error {
 			log := log.With().Str("beforeCheckHook", f.name).Logger()
 			log.Debug().Msg("adding beforeCheckHook")
 			go func() {
+				// f.ctx is a child of s.ctx, so no need to check both
+				<-f.ctx.Done()
 				select {
-				case <-ctx.Done():
-					return
-				case <-f.ctx.Done():
-				}
-
-				select {
-				case <-ctx.Done():
-					return
+				case <-s.ctx.Done():
+					// removeCtx is a child of s.ctx, so no need to call removed()
 				case rmBeforeCheckHook <- f:
 				}
 			}()
@@ -191,14 +190,9 @@ func (s *StateRunner) manage() error {
 			log := log.With().Str("afterCheckHook", f.name).Logger()
 			log.Debug().Msg("adding afterCheckHook")
 			go func() {
+				<-f.ctx.Done()
 				select {
-				case <-ctx.Done():
-					return
-				case <-f.ctx.Done():
-				}
-
-				select {
-				case <-ctx.Done():
+				case <-s.ctx.Done():
 					return
 				case rmAfterCheckHook <- f:
 				}
@@ -217,14 +211,9 @@ func (s *StateRunner) manage() error {
 			log := log.With().Str("afterRunHook", f.name).Logger()
 			log.Debug().Msg("adding afterRunHook")
 			go func() {
+				<-f.ctx.Done()
 				select {
-				case <-ctx.Done():
-					return
-				case <-f.ctx.Done():
-				}
-
-				select {
-				case <-ctx.Done():
+				case <-s.ctx.Done():
 					return
 				case rmAfterRunHook <- f:
 				}
@@ -408,31 +397,47 @@ func NewStateRunner(ctx context.Context, state State) *StateRunner {
 		trigger:            make(chan context.Context),
 		getLastResult:      make(chan chan<- *StateRunResult),
 		addBeforeCheckHook: make(chan *beforeCheckHook),
+		addAfterCheckHook:  make(chan *afterCheckHook),
 		addAfterRunHook:    make(chan *afterRunHook),
 	}
 	go s.manage()
 	return s
 }
 
-type beforeCheckHook struct {
+type hook struct {
 	ctx     context.Context
 	removed func()
 	name    string
-	f       func(ctx context.Context) error
+}
+
+func (s *StateRunner) newHook(name string) (hook, func()) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	removedCtx, removed := context.WithCancel(s.ctx)
+	h := hook{
+		ctx:     ctx,
+		removed: removed,
+		name:    name,
+	}
+	remove := func() {
+		cancel()
+		<-removedCtx.Done()
+	}
+	return h, remove
+}
+
+type beforeCheckHook struct {
+	hook
+	f func(ctx context.Context) error
 }
 
 type afterCheckHook struct {
-	ctx     context.Context
-	removed func()
-	name    string
-	f       func(ctx context.Context, changeNeeded bool, err error) error
+	hook
+	f func(ctx context.Context, changeNeeded bool, err error) error
 }
 
 type afterRunHook struct {
-	ctx     context.Context
-	removed func()
-	name    string
-	f       func(ctx context.Context, err error)
+	hook
+	f func(ctx context.Context, err error)
 }
 
 func wrapErr(parent error, child error) error {
@@ -457,22 +462,13 @@ var ErrBeforeCheckHook = errors.New("beforeCheckHook failed")
 // If The provided function should check the provided context so that it can exit early if the runner is stopped, or other BeforeCheck functions have errored
 // If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
 func (s *StateRunner) AddBeforeCheckHook(name string, f func(context.Context) error) func() {
-	ctx, remove := context.WithCancel(s.ctx)
-	removedCtx, removed := context.WithCancel(s.ctx)
+	h, remove := s.newHook(name)
 	select {
-	case s.addBeforeCheckHook <- &beforeCheckHook{
-		ctx:     ctx,
-		removed: removed,
-		name:    name,
-		f:       wrapErrf(ErrBeforeCheckHook, f),
-	}:
+	case s.addBeforeCheckHook <- &beforeCheckHook{h, wrapErrf(ErrBeforeCheckHook, f)}:
 	case <-s.ctx.Done():
-		removed()
+		h.removed()
 	}
-	return func() {
-		remove()
-		<-removedCtx.Done()
-	}
+	return remove
 }
 
 // ErrConditionNotMet signals that a precheck condition was not met and the state should not run, but did not error in an unexpected way
@@ -512,25 +508,16 @@ var ErrAfterCheckHook = errors.New("before function failed")
 //
 // Cancel ctx to remove the function from the state runner
 func (s *StateRunner) AddAfterCheckHook(name string, f func(ctx context.Context, changeNeeded bool, err error) error) func() {
-	ctx, remove := context.WithCancel(s.ctx)
-	removedCtx, removed := context.WithCancel(s.ctx)
+	h, remove := s.newHook(name)
 	select {
-	case s.addAfterCheckHook <- &afterCheckHook{
-		ctx:     ctx,
-		removed: removed,
-		name:    name,
-		f: func(ctx context.Context, changeNeeded bool, err error) error {
-			err = f(ctx, changeNeeded, err)
-			return wrapErr(ErrAfterCheckHook, err)
-		},
-	}:
+	case s.addAfterCheckHook <- &afterCheckHook{h,
+		func(ctx context.Context, changeNeeded bool, err error) error {
+			return wrapErr(ErrAfterCheckHook, f(ctx, changeNeeded, err))
+		}}:
 	case <-s.ctx.Done():
-		removed()
+		h.removed()
 	}
-	return func() {
-		remove()
-		<-removedCtx.Done()
-	}
+	return remove
 }
 
 // AddChangesRequiredHook adds a function that is run after the check step, if changes are required
@@ -552,24 +539,13 @@ func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context
 //
 // AfterRunHooks do not block returning the StateContext result. This means that a subsequent state run could run the AfterHook before the previous one finished.
 func (s *StateRunner) AddAfterRunHook(name string, f func(ctx context.Context, err error)) func() {
-	ctx, remove := context.WithCancel(s.ctx)
-	removedCtx, removed := context.WithCancel(s.ctx)
-	go func() {
-		select {
-		case s.addAfterRunHook <- &afterRunHook{
-			ctx:     ctx,
-			removed: removed,
-			name:    name,
-			f:       f,
-		}:
-		case <-s.ctx.Done():
-			removed()
-		}
-	}()
-	return func() {
-		remove()
-		<-removedCtx.Done()
+	h, remove := s.newHook(name)
+	select {
+	case s.addAfterRunHook <- &afterRunHook{h, f}:
+	case <-s.ctx.Done():
+		h.removed()
 	}
+	return remove
 }
 
 // AddAfterSuccessHook adds a function that is run after a successful state run.
