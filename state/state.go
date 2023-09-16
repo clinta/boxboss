@@ -193,7 +193,6 @@ func (s *StateRunner) manage() error {
 				<-f.ctx.Done()
 				select {
 				case <-s.ctx.Done():
-					return
 				case rmAfterCheckHook <- f:
 				}
 			}()
@@ -214,7 +213,6 @@ func (s *StateRunner) manage() error {
 				<-f.ctx.Done()
 				select {
 				case <-s.ctx.Done():
-					return
 				case rmAfterRunHook <- f:
 				}
 			}()
