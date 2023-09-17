@@ -269,18 +269,6 @@ func (s *StateRunner) Result(ctx context.Context) *StateRunResult {
 	}
 }
 
-// Running returns true if the state is currently running
-func (s *StateRunner) Running() bool {
-	res := make(chan *StateRunResult)
-	select {
-	case s.getLastResult <- res:
-		<-res
-		return false
-	default:
-		return true
-	}
-}
-
 // NewStateRunner creates the state runner that will run, listening for triggers from Apply until ctx is canceled
 //
 // Do not attempt to use the state runner after the context is canceled

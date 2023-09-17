@@ -259,6 +259,7 @@ func TestCancelingOneOfTwoTriggers(t *testing.T) {
 		}
 	}
 	triggerCtx, triggerCancel := context.WithCancel(ctx)
+	//log.Debug().Msg("wat")
 	applyErr := make(chan error)
 	go func() {
 		applyErr <- runner.Apply(triggerCtx)
