@@ -279,4 +279,39 @@ func TestCancelingOneOfTwoTriggers(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-// Test canceling two triggers
+func TestCancelingOneTriggersWhileAnotherIsRunning(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	startCheck := make(chan struct{})
+	blockCheck := make(chan struct{})
+	state.check = func(ctx context.Context) (bool, error) {
+		close(startCheck)
+		select {
+		case <-blockCheck:
+			return false, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+
+		}
+	}
+	triggerCtx, _ := context.WithCancel(ctx)
+	applyErr := make(chan error)
+	go func() {
+		applyErr <- runner.Apply(triggerCtx)
+	}()
+	triggerCtx2, triggerCancel2 := context.WithCancel(ctx)
+	applyErr2 := make(chan error)
+	<-startCheck
+	go func() {
+		applyErr2 <- runner.Apply(triggerCtx2)
+	}()
+	triggerCancel2()
+	err2 := <-applyErr2
+	assert.ErrorIs(err2, context.Canceled)
+	close(blockCheck)
+	assert.Nil(<-applyErr)
+	res := runner.Result(ctx)
+	assert.Nil(res.Err())
+	cancel()
+	goleak.VerifyNone(t)
+}
