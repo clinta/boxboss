@@ -53,7 +53,7 @@ func (b *BasicState) Run(ctx context.Context) (bool, error) {
 }
 
 // NewBasicState creates a new simple state
-func NewBasicState(name string, check func(context.Context) (bool, error), run func(context.Context) (bool, error)) State {
+func NewBasicState(name string, check func(context.Context) (bool, error), run func(context.Context) (bool, error)) *BasicState {
 	return &BasicState{
 		name:  name,
 		check: check,

@@ -31,42 +31,28 @@ func newCatchLog(level zerolog.Level, msg string) *catchLog {
 }
 
 type testState struct {
-	name            string
+	*BasicState
 	checks          []time.Time
 	runs            []time.Time
-	check           func(ctx context.Context) (bool, error)
-	run             func(ctx context.Context) (bool, error)
 	retCheckChanges bool
 	retCheckErr     error
 	retRunChanges   bool
 	retRunErr       error
 }
 
-func (t *testState) Check(ctx context.Context) (bool, error) {
-	t.checks = append(t.checks, time.Now())
-	return t.check(ctx)
-}
-
-func (t *testState) Run(ctx context.Context) (bool, error) {
-	t.runs = append(t.runs, time.Now())
-	return t.run(ctx)
-}
-
-func (t *testState) Name() string {
-	return t.name
-}
-
 func newTestRunner() (context.Context, func(), *testState, *StateRunner) {
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &testState{
-		name: "testState",
-	}
-	t.check = func(ctx context.Context) (bool, error) {
-		return t.retCheckChanges, t.retCheckErr
-	}
-	t.run = func(ctx context.Context) (bool, error) {
-		return t.retRunChanges, t.retRunErr
-	}
+	t := &testState{}
+	t.BasicState = NewBasicState("testState",
+		func(ctx context.Context) (bool, error) {
+			t.checks = append(t.checks, time.Now())
+			return t.retCheckChanges, t.retCheckErr
+		},
+		func(ctx context.Context) (bool, error) {
+			t.runs = append(t.runs, time.Now())
+			return t.retRunChanges, t.retRunErr
+		},
+	)
 	return ctx, cancel, t, NewStateRunner(ctx, t)
 }
 
