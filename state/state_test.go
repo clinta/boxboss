@@ -232,23 +232,29 @@ func TestBeforeCheckRemove(t *testing.T) {
 func TestCancelingTrigger(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
+	startCheck := make(chan struct{})
 	blockCheck := make(chan struct{})
 	state.check = func(ctx context.Context) (bool, error) {
-		<-blockCheck
-		return false, nil
-	}
+		close(startCheck)
+		select {
+		case <-blockCheck:
+			return false, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
 
+		}
+	}
 	triggerCtx, triggerCancel := context.WithCancel(ctx)
-	applyDone := make(chan struct{})
+	applyErr := make(chan error)
 	go func() {
-		assert.ErrorIs(runner.Apply(triggerCtx), context.Canceled)
-		close(applyDone)
+		applyErr <- runner.Apply(triggerCtx)
 	}()
+	<-startCheck
 	triggerCancel()
-	<-applyDone
+	assert.ErrorIs(<-applyErr, context.Canceled)
+	close(blockCheck)
 	res := runner.Result(ctx)
 	assert.ErrorIs(res.Err(), context.Canceled)
-	close(blockCheck)
 	cancel()
 	goleak.VerifyNone(t)
 }
