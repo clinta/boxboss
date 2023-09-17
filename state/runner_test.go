@@ -315,3 +315,13 @@ func TestCancelingOneTriggersWhileAnotherIsRunning(t *testing.T) {
 	cancel()
 	goleak.VerifyNone(t)
 }
+
+func TestApplyOnce(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	assert.Nil(runner.ApplyOnce(ctx))
+	assert.Nil(runner.ApplyOnce(ctx))
+	assert.Equal(len(state.checks), 1)
+	cancel()
+	goleak.VerifyNone(t)
+}
