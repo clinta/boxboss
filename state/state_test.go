@@ -228,5 +228,30 @@ func TestBeforeCheckRemove(t *testing.T) {
 
 //TODO
 // Test canceling a trigger
+
+func TestCancelingTrigger(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	blockCheck := make(chan struct{})
+	state.check = func(ctx context.Context) (bool, error) {
+		<-blockCheck
+		return false, nil
+	}
+
+	triggerCtx, triggerCancel := context.WithCancel(ctx)
+	applyDone := make(chan struct{})
+	go func() {
+		assert.ErrorIs(runner.Apply(triggerCtx), context.Canceled)
+		close(applyDone)
+	}()
+	triggerCancel()
+	<-applyDone
+	res := runner.Result(ctx)
+	assert.ErrorIs(res.Err(), context.Canceled)
+	close(blockCheck)
+	cancel()
+	goleak.VerifyNone(t)
+}
+
 // Test canceling only one of two triggers
 // Test canceling two triggers

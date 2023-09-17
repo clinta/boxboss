@@ -63,20 +63,20 @@ func NewBasicState(name string, check func(context.Context) (bool, error), run f
 
 // StateRunner runs the state whenever a trigger is received
 type StateRunner struct {
-	state              State
-	ctx                context.Context
-	trigger            chan context.Context
-	getLastResult      chan chan<- *StateRunResult
-	addBeforeCheckHook chan *beforeCheckHook
-	addAfterCheckHook  chan *afterCheckHook
-	addAfterRunHook    chan *afterRunHook
+	state         State
+	ctx           context.Context
+	log           zerolog.Logger
+	trigger       chan context.Context
+	getLastResult chan chan<- *StateRunResult
+	lastResult    *StateRunResult
+	hookMgr       *hookMgr
 }
 
 // StateRunResult holds the result of a state run
 type StateRunResult struct {
-	changed   bool
-	completed time.Time
-	err       error
+	changed bool
+	time    time.Time
+	err     error
 }
 
 func (r *StateRunResult) Changed() bool {
@@ -84,7 +84,7 @@ func (r *StateRunResult) Changed() bool {
 }
 
 func (r *StateRunResult) Completed() time.Time {
-	return r.completed
+	return r.time
 }
 
 func (r *StateRunResult) Err() error {
@@ -109,7 +109,7 @@ func (s *StateRunner) Apply(ctx context.Context) error {
 // ApplyOnce will block if the state is currently applying
 func (s *StateRunner) ApplyOnce(ctx context.Context) error {
 	res := s.Result(ctx)
-	if res != StateNotRunResult {
+	if !errors.Is(res.Err(), ErrStateNotRun) {
 		return res.err
 	}
 	return s.Apply(ctx)
@@ -118,231 +118,290 @@ func (s *StateRunner) ApplyOnce(ctx context.Context) error {
 // ErrStateNotRun is the error in the StateResult of a StateRunner that has not run yet
 var ErrStateNotRun = errors.New("state has not yet run")
 
-// StateNotRunResult is in the StateResult if the StateRunner has not yet run at all
-var StateNotRunResult = &StateRunResult{false, time.Time{}, ErrStateNotRun}
-
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
+
+type hookMgr struct {
+	ctx context.Context
+	log zerolog.Logger
+
+	hookOp chan func()
+
+	addBeforeCheckHook chan *beforeCheckHook
+	rmBeforeCheckHook  chan *beforeCheckHook
+	beforeCheckHooks   map[*beforeCheckHook]struct{}
+
+	addAfterCheckHook chan *afterCheckHook
+	rmAfterCheckHook  chan *afterCheckHook
+	afterCheckHooks   map[*afterCheckHook]struct{}
+
+	addAfterRunHook chan *afterRunHook
+	rmAfterRunHook  chan *afterRunHook
+	afterRunHooks   map[*afterRunHook]struct{}
+}
+
+func newHookMgr(ctx context.Context, log zerolog.Logger) *hookMgr {
+	h := &hookMgr{
+		ctx:                ctx,
+		log:                log,
+		hookOp:             make(chan func()),
+		addBeforeCheckHook: make(chan *beforeCheckHook),
+		rmBeforeCheckHook:  make(chan *beforeCheckHook),
+		beforeCheckHooks:   map[*beforeCheckHook]struct{}{},
+		addAfterCheckHook:  make(chan *afterCheckHook),
+		rmAfterCheckHook:   make(chan *afterCheckHook),
+		afterCheckHooks:    map[*afterCheckHook]struct{}{},
+		addAfterRunHook:    make(chan *afterRunHook),
+		rmAfterRunHook:     make(chan *afterRunHook),
+		afterRunHooks:      map[*afterRunHook]struct{}{},
+	}
+	go h.manage()
+	return h
+}
+
+func (h *hookMgr) manage() {
+	log := h.log
+	for {
+		select {
+		case <-h.ctx.Done():
+			log.Debug().Msg("shutting down hook manager")
+			return
+
+		case f := <-h.addBeforeCheckHook:
+			h.hookOp <- func() {
+				log := log.With().Str("beforeCheckHook", f.name).Logger()
+				log.Debug().Msg("adding beforeCheckHook")
+				go func() {
+					// f.ctx is a child of s.ctx, so no need to check both
+					<-f.ctx.Done()
+					select {
+					case <-h.ctx.Done():
+						// removeCtx is a child of s.ctx, so no need to call removed()
+					case h.rmBeforeCheckHook <- f:
+					}
+				}()
+				h.beforeCheckHooks[f] = struct{}{}
+			}
+
+		case f := <-h.rmBeforeCheckHook:
+			h.hookOp <- func() {
+				log := log.With().Str("beforeCheckHook", f.name).Logger()
+				log.Debug().Msg("removing beforeCheckHook")
+				delete(h.beforeCheckHooks, f)
+				f.removed()
+			}
+
+		case f := <-h.addAfterCheckHook:
+			h.hookOp <- func() {
+				log := log.With().Str("afterCheckHook", f.name).Logger()
+				log.Debug().Msg("adding afterCheckHook")
+				go func() {
+					<-f.ctx.Done()
+					select {
+					case <-h.ctx.Done():
+					case h.rmAfterCheckHook <- f:
+					}
+				}()
+				h.afterCheckHooks[f] = struct{}{}
+			}
+
+		case f := <-h.rmAfterCheckHook:
+			h.hookOp <- func() {
+				log := log.With().Str("afterCheckHook", f.name).Logger()
+				log.Debug().Msg("removing afterCheckHook")
+				delete(h.afterCheckHooks, f)
+				f.removed()
+			}
+
+		case f := <-h.addAfterRunHook:
+			h.hookOp <- func() {
+				log := log.With().Str("afterRunHook", f.name).Logger()
+				log.Debug().Msg("adding afterRunHook")
+				go func() {
+					<-f.ctx.Done()
+					select {
+					case <-h.ctx.Done():
+					case h.rmAfterRunHook <- f:
+					}
+				}()
+				h.afterRunHooks[f] = struct{}{}
+			}
+
+		case f := <-h.rmAfterRunHook:
+			h.hookOp <- func() {
+				log := log.With().Str("afterRunHook", f.name).Logger()
+				log.Debug().Msg("removing afterRunHook")
+				delete(h.afterRunHooks, f)
+				f.removed()
+			}
+		}
+	}
+}
 
 // manage is the function that manages the state, runnning whenever a trigger is recieved
 //
 // # Provided context can be used to stop
 //
 // TODO: Add rate limiting
-func (s *StateRunner) manage() error {
-	lastResult := StateNotRunResult
-	beforeCheckHooks := make(map[*beforeCheckHook]struct{})
-	rmBeforeCheckHook := make(chan *beforeCheckHook)
-	afterCheckHooks := make(map[*afterCheckHook]struct{})
-	rmAfterCheckHook := make(chan *afterCheckHook)
-	afterRunHooks := make(map[*afterRunHook]struct{})
-	rmAfterRunHook := make(chan *afterRunHook)
-	log := log.With().Str("stateRunner", s.state.Name()).Logger()
+func (s *StateRunner) manage() {
+	log := s.log
 
 	for {
-		// triggerCtx will be Done if all trigger contexts are canceled
-		triggerCtx, triggerCancel := context.WithCancel(s.ctx)
-		triggerWg := sync.WaitGroup{}
-		// wait for the first trigger to come in
 		select {
 		case <-s.ctx.Done():
 			log.Debug().Msg("shutting down runner")
-			triggerCancel()
-			return s.ctx.Err()
+			return
 		case resCh := <-s.getLastResult:
-			resCh <- lastResult
-			continue
-
-		case f := <-s.addBeforeCheckHook:
-			log := log.With().Str("beforeCheckHook", f.name).Logger()
-			log.Debug().Msg("adding beforeCheckHook")
-			go func() {
-				// f.ctx is a child of s.ctx, so no need to check both
-				<-f.ctx.Done()
-				select {
-				case <-s.ctx.Done():
-					// removeCtx is a child of s.ctx, so no need to call removed()
-				case rmBeforeCheckHook <- f:
-				}
-			}()
-			beforeCheckHooks[f] = struct{}{}
-			continue
-
-		case f := <-rmBeforeCheckHook:
-			log := log.With().Str("beforeCheckHook", f.name).Logger()
-			log.Debug().Msg("removing beforeCheckHook")
-			delete(beforeCheckHooks, f)
-			f.removed()
-			continue
-
-		case f := <-s.addAfterCheckHook:
-			log := log.With().Str("afterCheckHook", f.name).Logger()
-			log.Debug().Msg("adding afterCheckHook")
-			go func() {
-				<-f.ctx.Done()
-				select {
-				case <-s.ctx.Done():
-				case rmAfterCheckHook <- f:
-				}
-			}()
-			afterCheckHooks[f] = struct{}{}
-			continue
-
-		case f := <-rmAfterCheckHook:
-			log := log.With().Str("afterCheckHook", f.name).Logger()
-			log.Debug().Msg("removing afterCheckHook")
-			delete(afterCheckHooks, f)
-			f.removed()
-			continue
-
-		case f := <-s.addAfterRunHook:
-			log := log.With().Str("afterRunHook", f.name).Logger()
-			log.Debug().Msg("adding afterRunHook")
-			go func() {
-				<-f.ctx.Done()
-				select {
-				case <-s.ctx.Done():
-				case rmAfterRunHook <- f:
-				}
-			}()
-			afterRunHooks[f] = struct{}{}
-			continue
-
-		case f := <-rmAfterRunHook:
-			log := log.With().Str("afterRunHook", f.name).Logger()
-			log.Debug().Msg("removing afterRunHook")
-			delete(afterRunHooks, f)
-			f.removed()
-			continue
-
+			resCh <- s.lastResult
+		case f := <-s.hookMgr.hookOp:
+			f()
 		case tCtx := <-s.trigger:
-			triggerWg.Add(1)
-			go func() {
-				select {
-				case <-tCtx.Done():
-				case <-triggerCtx.Done():
-				}
-				triggerWg.Done()
-			}()
 			log.Debug().Msg("triggered")
+			s.runTrigger(tCtx)
 		}
+	}
+}
 
-		// collect all pending triggers
-		for {
+func (s *StateRunner) runTrigger(triggerCtx context.Context) {
+	// triggerCtx will be Done if all trigger contexts are canceled
+	triggersCtx, triggersCancel := context.WithCancel(s.ctx)
+	triggersWg := sync.WaitGroup{}
+
+	addTrigger := func(tCtx context.Context) {
+		triggersWg.Add(1)
+		go func() {
 			select {
-			case tCtx := <-s.trigger:
-				triggerWg.Add(1)
-				go func() {
-					select {
-					case <-tCtx.Done():
-					case <-triggerCtx.Done():
-					}
-					triggerWg.Done()
-				}()
-				continue
-			default:
-				go func() {
-					// cancel triggerCtx if all triggers contexts are canceled
-					triggerWg.Wait()
-					triggerCancel()
-				}()
+			case <-tCtx.Done():
+			case <-triggersCtx.Done():
 			}
-			break
-		}
-
-		changed, err := func() (bool, error) {
-			bcfg, bcfCtx := errgroup.WithContext(triggerCtx)
-			for f := range beforeCheckHooks {
-				f := f
-				bcfg.Go(func() error {
-					log := log.With().Str("beforeCheckHook", f.name).Logger()
-					log.Debug().Msg("running beforeCheckHook")
-					err := f.f(bcfCtx)
-					return err
-				})
-			}
-			err := bcfg.Wait()
-			if err != nil {
-				log.Err(err).Msg("")
-				return false, err
-			}
-
-			log.Debug().Msg("running check")
-			changeNeeded, err := s.state.Check(triggerCtx)
-			if err != nil {
-				log.Err(err)
-				return changeNeeded, errors.Join(ErrCheckFailed, err)
-			}
-
-			acfg, acfCtx := errgroup.WithContext(triggerCtx)
-			for f := range afterCheckHooks {
-				f := f
-				acfg.Go(func() error {
-					log := log.With().Str("afterCheckHook", f.name).Logger()
-					log.Debug().Msg("running afterCheckHook")
-					err := f.f(acfCtx, changeNeeded, err)
-					return err
-				})
-			}
-			afcErr := acfg.Wait()
-
-			if err != nil {
-				log.Err(err).Msg("")
-				return false, err
-			}
-
-			if afcErr != nil {
-				log.Err(err).Msg("")
-			}
-
-			if !changeNeeded {
-				log.Debug().Msg("check indicates no changes required")
-				return false, nil
-			}
-
-			log.Debug().Msg("running")
-			changed, err := s.state.Run(triggerCtx)
-			err = wrapErr(ErrRunFailed, err)
-
-			if !changed {
-				log.Warn().Msg(checkChangesButNoRunChanges)
-			}
-
-			log = log.With().Bool("changed", changed).Logger()
-			if err != nil {
-				log.Err(err)
-			}
-
-			return changed, err
-			// TODO: Add information to context indicating that this error is from Run()
+			triggersWg.Done()
 		}()
+	}
 
-		lastResult = &StateRunResult{changed, time.Now(), err}
+	addTrigger(triggerCtx)
 
-		afwg := sync.WaitGroup{}
-		for f := range afterRunHooks {
-			f := f
-			afwg.Add(1)
-			go func() {
+	// collect all pending triggers and hook operations before continuing
+	for {
+		select {
+		case <-triggersCtx.Done():
+			triggersCancel()
+			return
+		case tCtx := <-s.trigger:
+			addTrigger(tCtx)
+			continue
+		case f := <-s.hookMgr.hookOp:
+			f()
+			continue
+		default:
+		}
+		break
+	}
+
+	go func() {
+		// cancel triggerCtx if all triggers contexts are canceled
+		triggersWg.Wait()
+		triggersCancel()
+	}()
+
+	s.runState(triggersCtx)
+	triggersCancel()
+	triggersWg.Wait()
+
+	// Return any waiting results before listening for new trigggers
+	for {
+		select {
+		case resCh := <-s.getLastResult:
+			resCh <- s.lastResult
+			continue
+		default:
+		}
+		break
+	}
+}
+
+func (s *StateRunner) runState(ctx context.Context) {
+	s.lastResult = &StateRunResult{false, time.Now(), s.lastResult.err}
+	log := s.log
+
+	{
+		eg, egCtx := errgroup.WithContext(ctx)
+		for h := range s.hookMgr.beforeCheckHooks {
+			h := h
+			eg.Go(func() error {
+				log := log.With().Str("beforeCheckHook", h.name).Logger()
+				log.Debug().Msg("running beforeCheckHook")
+				return h.f(egCtx)
+			})
+		}
+		err := eg.Wait()
+		if err != nil {
+			if errors.Is(err, ErrConditionNotMet) {
+				log := log.With().Err(err).Logger()
+				log.Debug().Msg("condition not met")
+				return
+			}
+			log.Err(err).Msg("before hook failed")
+			s.lastResult = &StateRunResult{false, time.Now(), err}
+			return
+		}
+	}
+
+	log.Debug().Msg("running check")
+	changeNeeded, err := s.state.Check(ctx)
+	if err != nil {
+		log.Err(err).Msg("check failed")
+		s.lastResult = &StateRunResult{false, time.Now(), errors.Join(ErrCheckFailed, err)}
+		return
+	}
+
+	{
+		eg, egCtx := errgroup.WithContext(ctx)
+		for h := range s.hookMgr.afterCheckHooks {
+			h := h
+			eg.Go(func() error {
+				log := log.With().Str("afterCheckHook", h.name).Logger()
+				log.Debug().Msg("running afterCheckHook")
+				err := h.f(egCtx, changeNeeded, err)
+				return err
+			})
+		}
+		err := eg.Wait()
+
+		if err != nil {
+			log.Err(err).Msg("after check hook failed")
+			s.lastResult = &StateRunResult{false, time.Now(), err}
+			return
+		}
+	}
+
+	if !changeNeeded {
+		log.Debug().Msg("check indicates no changes required")
+		s.lastResult = &StateRunResult{false, time.Now(), err}
+		return
+	}
+
+	log.Debug().Msg("running")
+	changed, err := s.state.Run(ctx)
+	err = wrapErr(ErrRunFailed, err)
+
+	if !changed {
+		log.Warn().Msg(checkChangesButNoRunChanges)
+	}
+
+	log = log.With().Bool("changed", changed).Logger()
+	if err != nil {
+		log.Err(err)
+	}
+
+	s.lastResult = &StateRunResult{changed, time.Now(), err}
+
+	{
+		for h := range s.hookMgr.afterRunHooks {
+			go func(f *afterRunHook) {
 				log := log.With().Str("afterHook", f.name).Logger()
 				log.Debug().Msg("running afterHook")
-				f.f(triggerCtx, err)
-			}()
+				f.f(ctx, err)
+			}(h)
 		}
-
-		// Return any waiting results before listening for new trigggers
-		for {
-			select {
-			case resCh := <-s.getLastResult:
-				resCh <- lastResult
-				continue
-			default:
-			}
-			break
-		}
-
-		// done with triggerCtx
-		triggerCancel()
-		triggerWg.Wait()
 	}
 }
 
@@ -377,14 +436,15 @@ func (s *StateRunner) Running() bool {
 //
 // Do not attempt to use the state runner after the context is canceled
 func NewStateRunner(ctx context.Context, state State) *StateRunner {
+	log := log.With().Str("stateRunner", state.Name()).Logger()
 	s := &StateRunner{
-		state:              state,
-		ctx:                ctx,
-		trigger:            make(chan context.Context),
-		getLastResult:      make(chan chan<- *StateRunResult),
-		addBeforeCheckHook: make(chan *beforeCheckHook),
-		addAfterCheckHook:  make(chan *afterCheckHook),
-		addAfterRunHook:    make(chan *afterRunHook),
+		state:         state,
+		ctx:           ctx,
+		log:           log,
+		trigger:       make(chan context.Context),
+		getLastResult: make(chan chan<- *StateRunResult),
+		lastResult:    &StateRunResult{false, time.Time{}, ErrStateNotRun},
+		hookMgr:       newHookMgr(ctx, log),
 	}
 	go s.manage()
 	return s
@@ -450,7 +510,7 @@ var ErrBeforeCheckHook = errors.New("beforeCheckHook failed")
 func (s *StateRunner) AddBeforeCheckHook(name string, f func(context.Context) error) func() {
 	h, remove := s.newHook(name)
 	select {
-	case s.addBeforeCheckHook <- &beforeCheckHook{h, wrapErrf(ErrBeforeCheckHook, f)}:
+	case s.hookMgr.addBeforeCheckHook <- &beforeCheckHook{h, wrapErrf(ErrBeforeCheckHook, f)}:
 	case <-s.ctx.Done():
 		h.removed()
 	}
@@ -496,7 +556,7 @@ var ErrAfterCheckHook = errors.New("before function failed")
 func (s *StateRunner) AddAfterCheckHook(name string, f func(ctx context.Context, changeNeeded bool, err error) error) func() {
 	h, remove := s.newHook(name)
 	select {
-	case s.addAfterCheckHook <- &afterCheckHook{h,
+	case s.hookMgr.addAfterCheckHook <- &afterCheckHook{h,
 		func(ctx context.Context, changeNeeded bool, err error) error {
 			return wrapErr(ErrAfterCheckHook, f(ctx, changeNeeded, err))
 		}}:
@@ -527,7 +587,7 @@ func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context
 func (s *StateRunner) AddAfterRunHook(name string, f func(ctx context.Context, err error)) func() {
 	h, remove := s.newHook(name)
 	select {
-	case s.addAfterRunHook <- &afterRunHook{h, f}:
+	case s.hookMgr.addAfterRunHook <- &afterRunHook{h, f}:
 	case <-s.ctx.Done():
 		h.removed()
 	}
