@@ -235,6 +235,7 @@ func TestCancelingTrigger(t *testing.T) {
 		close(startCheck)
 		select {
 		case <-blockCheck:
+			log.Debug().Msg("blockcheck cleared")
 			return false, nil
 		case <-ctx.Done():
 			return false, ctx.Err()
@@ -249,9 +250,9 @@ func TestCancelingTrigger(t *testing.T) {
 	<-startCheck
 	triggerCancel()
 	assert.ErrorIs(<-applyErr, context.Canceled)
-	close(blockCheck)
-	res := runner.Result(ctx)
+	res := runner.Result(context.Background())
 	assert.ErrorIs(res.Err(), context.Canceled)
+	close(blockCheck)
 	cancel()
 	goleak.VerifyNone(t)
 }

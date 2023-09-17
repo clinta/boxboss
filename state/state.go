@@ -339,7 +339,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 				log.Debug().Msg("condition not met")
 				return
 			}
-			log.Err(err).Msg("before hook failed")
+			log.Error().Err(err).Msg("before hook failed")
 			s.lastResult = &StateRunResult{false, time.Now(), err}
 			return
 		}
@@ -348,7 +348,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 	log.Debug().Msg("running check")
 	changeNeeded, err := s.state.Check(ctx)
 	if err != nil {
-		log.Err(err).Msg("check failed")
+		log.Error().Err(err).Msg("check failed")
 		s.lastResult = &StateRunResult{false, time.Now(), errors.Join(ErrCheckFailed, err)}
 		return
 	}
@@ -367,10 +367,15 @@ func (s *StateRunner) runState(ctx context.Context) {
 		err := eg.Wait()
 
 		if err != nil {
-			log.Err(err).Msg("after check hook failed")
+			log.Error().Err(err).Msg("after check hook failed")
 			s.lastResult = &StateRunResult{false, time.Now(), err}
 			return
 		}
+	}
+
+	err = wrapErr(ErrCheckFailed, err)
+	if err != nil {
+		log.Error().Err(err).Msg("check failed")
 	}
 
 	if !changeNeeded {
@@ -389,7 +394,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 
 	log = log.With().Bool("changed", changed).Logger()
 	if err != nil {
-		log.Err(err)
+		log.Error().Err(err).Msg("run failed")
 	}
 
 	s.lastResult = &StateRunResult{changed, time.Now(), err}
