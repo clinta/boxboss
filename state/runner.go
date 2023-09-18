@@ -147,6 +147,17 @@ func (s *StateRunner) runTrigger(triggerCtx context.Context) {
 	}()
 
 	s.runState(triggersCtx)
+
+	{
+		for h := range s.hookMgr.postRunHooks {
+			go func(f *postRunHook) {
+				log := log.With().Str("post-run hook", f.name).Logger()
+				log.Debug().Msg("running post-run hook")
+				f.f(triggerCtx, s.lastResult.err)
+			}(h)
+		}
+	}
+
 	triggersCancel()
 	triggersWg.Wait()
 
@@ -242,17 +253,6 @@ func (s *StateRunner) runState(ctx context.Context) {
 	}
 
 	s.lastResult = &StateRunResult{changed, time.Now(), err}
-
-	{
-		//TODO postRunHooks need to run even if any of hte previous steps failed and returned early
-		for h := range s.hookMgr.postRunHooks {
-			go func(f *postRunHook) {
-				log := log.With().Str("post-run hook", f.name).Logger()
-				log.Debug().Msg("running post-run hook")
-				f.f(ctx, err)
-			}(h)
-		}
-	}
 }
 
 // Result gets the StateRunner result
