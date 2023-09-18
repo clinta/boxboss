@@ -174,14 +174,17 @@ func wrapErrf(parent error, f func(context.Context) error) func(context.Context)
 	}
 }
 
-// ErrPreCheckHook is returned if a PreCheckHook fails causing the Apply to fail
+// ErrPreCheckHook is returned if a PreCheckHook fails. It will wrap underlying errors.
 var ErrPreCheckHook = errors.New("pre-check hook failed")
 
-// AddPreCheckHook adds a function that is run before the Check step of the Runner
-// If any of these functions fail, the run will fail returning the first function that errored
-// returns a remove funciton that can be used to remove the hook from the runner.
-// If The provided function should check the provided context so that it can exit early if the runner is stopped, or other PreCheck hooks have errored
-// If the function returns ErrPreCheckConditionNotMet, it will not be logged as an error, but simply treated as a false condition check
+// AddPreCheckHook adds a function that is run before the Check step of the State.
+//
+// An error in this hook will propegate to the Apply and prevent Check or Run from running, except for ErrConditionNotMet.
+//
+// If multiple PreCheckHooks are specified, they will run concurrently, and the failure of any will cancel the contexts of the
+// remaining PreCheckHooks. The first error will be returned.
+//
+// AddPreCheckHook returns a function that can be used to remove the hook.
 func (s *StateRunner) AddPreCheckHook(name string, f func(context.Context) error) func() {
 	h, remove := s.newHook(name)
 	select {
@@ -192,19 +195,24 @@ func (s *StateRunner) AddPreCheckHook(name string, f func(context.Context) error
 	return remove
 }
 
-// ErrConditionNotMet signals that a precheck condition was not met and the state should not run, but did not error in an unexpected way
+// ErrConditionNotMet signals that a precheck condition was not met and the state should not run,
+// but did not error in an unexpected way.
+//
+// This error is not propegated to Apply, Apply will return nil if a ConditionNotMet is returned from a PreCheckHook.
 var ErrConditionNotMet = errors.New("condition not met")
 
-// ErrConditionHook is returned by the state when a Condition failed
+// ErrCondition is returned by the state when a Condition failed.
 //
-// This will be wrapped in an ErrPreCheckHook, use errors.Is to check for this error.
-var ErrConditionHook = errors.New("condition hook failed")
+// This will wrap the actual error returned by the condition, and will itself be wrapped in an ErrPreCheckHook, because
+// a condition is a PreCheckHook.
+var ErrCondition = errors.New("condition hook failed")
 
 // AddCondition adds a function that is a condition to determine whether or not Check should run.
 //
-//	The provided function should check the provided context so that it can exit early if the runner is stopped
+// If conditionMet returns false, any concurrently running PreCheckHook contexts will be canceled, and the State will
+// not be applied. But Apply will not return an error.
 //
-// Cancel ctx to remove the function from the state runner
+// AddCondition returns a function that can be used to remove the hook.
 func (s *StateRunner) AddCondition(name string, f func(context.Context) (conditionMet bool, err error)) func() {
 	bf := func(ctx context.Context) error {
 		v, err := f(ctx)
@@ -216,19 +224,23 @@ func (s *StateRunner) AddCondition(name string, f func(context.Context) (conditi
 		}
 		return nil
 	}
-	return s.AddPreCheckHook("condition: "+name, wrapErrf(ErrConditionHook, bf))
+	return s.AddPreCheckHook("condition: "+name, wrapErrf(ErrCondition, bf))
 }
 
 // ErrPostCheckHook is returned if a PostCheckHook fails causing the Apply to fail
 var ErrPostCheckHook = errors.New("post-check hook failed")
 
-// AddPostCheckHook adds a function that is run after the Check step of the Runner
-// They are only run if the all PreCheck hooks, and the Check itself succeeded.
-// If any of these functions fail, the run will fail returning the first function that errored
+// AddPostCheckHook adds a function that is run after the Check step of the State.
 //
-//	The provided function should check the provided context so that it can exit early if the runner is stopped
+// This is useful for actions that need to be run in preperation of a state. For example a file management state may neeed
+// A service to be stopped before the file can be managed.
 //
-// Cancel ctx to remove the function from the state runner
+// An error in this hook will propegate to the Apply and prevent Run from running.
+//
+// If multiple PostCheckHooks are specified, they will run concurrently, and the failure of any will cancel the contexts of the
+// remaining PostCheckHooks. The first error will be returned.
+//
+// AddPostCheckHook returns a function that can be used to remove the hook.
 func (s *StateRunner) AddPostCheckHook(name string, f func(ctx context.Context, changeNeeded bool) error) func() {
 	h, remove := s.newHook(name)
 	select {
@@ -242,7 +254,7 @@ func (s *StateRunner) AddPostCheckHook(name string, f func(ctx context.Context, 
 	return remove
 }
 
-// AddChangesRequiredHook adds a function that is run after the check step, if changes are required
+// AddChangesRequiredHook adds a function that is run after the check step, only if changes are required.
 func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context) error) func() {
 	return s.AddPostCheckHook("changesRequired: "+name, func(ctx context.Context, changeNeeded bool) error {
 		if changeNeeded {
@@ -252,14 +264,13 @@ func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context
 	})
 }
 
-// AddPostRunHook adds a function that is run at the end of the Run. This may be after the Run step failed or succeeded, or after the Check step failed or succeeded,
-// or after any of the other Pre functions failed or succceeded.
-//
-// The provided function should check the provided context so that it can exit early if the runner is stopped. The err provided to the function is the error returned from the Run.
-//
-// Cancel ctx to remove the function from the state runner.
+// AddPostRunHook adds a function that is run at the end of the state execution. This will run regardless of the source
+// of any errors. The function is responsible for checking the type of error.
 //
 // PostRunHooks do not block returning the StateContext result. This means that a subsequent state run could run the PostRunHook before the previous one finished.
+//
+// AddPostRunHook returns a function that can be used to remove the hook.
+// TODO, this should take a result rather than just an err
 func (s *StateRunner) AddPostRunHook(name string, f func(ctx context.Context, err error)) func() {
 	h, remove := s.newHook(name)
 	select {
@@ -270,11 +281,7 @@ func (s *StateRunner) AddPostRunHook(name string, f func(ctx context.Context, er
 	return remove
 }
 
-// AddPostSuccessHook adds a function that is run after a successful state run.
-//
-//	The provided function should check the provided context so that it can exit early if the runner is stopped
-//
-// Cancel ctx to remove the function from the state runner
+// AddPostSuccessHook adds a PostRunHook that is run after a successful state run.
 func (s *StateRunner) AddPostSuccessHook(name string, f func(context.Context)) func() {
 	return s.AddPostRunHook("afterSuccess: "+name, func(ctx context.Context, err error) {
 		if err == nil {
@@ -283,11 +290,7 @@ func (s *StateRunner) AddPostSuccessHook(name string, f func(context.Context)) f
 	})
 }
 
-// AddPostFailureHook adds a function that is run after a failed state run.
-//
-//	The provided function should check the provided context so that it can exit early if the runner is stopped
-//
-// Cancel ctx to remove the function from the state runner
+// AddPostFailureHook adds a PostRunHook that is run after a failed state run.
 func (s *StateRunner) AddPostFailureHook(name string, f func(ctx context.Context, err error)) func() {
 	return s.AddPostRunHook("afterFailure: "+name, func(ctx context.Context, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
@@ -296,15 +299,14 @@ func (s *StateRunner) AddPostFailureHook(name string, f func(ctx context.Context
 	})
 }
 
-// ErrDependancyFailed is returned by the state when a dependency failed
+// ErrDependancyFailed is returned by the state when a dependency failed.
 //
-// This will be wrapped in an ErrPreCheckHook, use errors.Is to check for this error.
+// This will be wrapped in an ErrPreCheckHook.
 var ErrDependancyFailed = errors.New("dependency failed")
 
 // DependOn makes s dependent on d. If s.Apply is called, this will make sure that d.Apply has been called at least once.
 //
-// d may fail and it will prevent s from running.
-// if d.Apply is run again later, it will not automatically trigger s. To do so, see TriggerOn
+// If d.ApplyOnce returns an error it will prevent s.Apply from running.
 func (s *StateRunner) DependOn(d *StateRunner) func() {
 	f := wrapErrf(ErrDependancyFailed, d.ApplyOnce)
 	remove := s.AddPreCheckHook("dependancy: "+d.state.Name(), f)
@@ -323,9 +325,9 @@ func DiscardErr(error) {
 	//noop
 }
 
-// TriggerOnSuccess causes this state to be applied whenever the triggering state succeeds
+// TriggerOnSuccess causes this s.Apply to be run whenever the t.Apply succeeds.
 //
-// cb is a callback to handle the result. Use LogErr to simply log the error, or DiscardErr to do nothing
+// cb is a callback to handle the result of s.Apply. Use LogErr to simply log the error, or DiscardErr to do nothing.
 func (s *StateRunner) TriggerOnSuccess(t *StateRunner, cb func(error)) func() {
 	f := func(ctx context.Context) {
 		cb(s.Apply(ctx))
@@ -338,7 +340,8 @@ func (s *StateRunner) TriggerOnSuccess(t *StateRunner, cb func(error)) func() {
 	return remove
 }
 
-// BlockOn prevents s from running while t is running
+// BlockOn prevents s.Apply from running while t.Apply is running
+// TODO add ConflictsWith to add BlockOn in both directions.
 func (s *StateRunner) BlockOn(t *StateRunner) func() {
 	remove := s.AddPreCheckHook("blockOn: "+t.state.Name(), func(ctx context.Context) error {
 		t.Result(ctx)

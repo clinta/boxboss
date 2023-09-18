@@ -22,7 +22,8 @@ func init() {
 var ErrCheckFailed = errors.New("state check failed")
 var ErrRunFailed = errors.New("state run failed")
 
-// StateRunner runs the state whenever a trigger is received
+// StateRunner launches a goroutine to accept addition and removal of hooks, and applies the state whenever Apply is called.
+// A StateRunner is safe for concurrent use by multiple goroutines.
 type StateRunner struct {
 	state         State
 	ctx           context.Context
@@ -33,29 +34,36 @@ type StateRunner struct {
 	hookMgr       *hookMgr
 }
 
-// StateRunResult holds the result of a state run
+// StateRunResult holds the result of a state run.
 type StateRunResult struct {
 	changed bool
 	time    time.Time
 	err     error
 }
 
+// Changed reports whether changes were made during the state run.
 func (r *StateRunResult) Changed() bool {
 	return r.changed
 }
 
+// Completed is the time that the last state run stopped.
 func (r *StateRunResult) Completed() time.Time {
 	return r.time
 }
 
+// Err is the error returned by the last state run.
 func (r *StateRunResult) Err() error {
 	return r.err
 }
 
-// Apply will apply the state. If the state is already running, it will block until the existing state run is complete, then run again
+// Apply will apply the state.
 //
-// If multiple request to apply come in while the state is running, they will not all block until the net run completes, but the next run will
-// only run once. Errors from that application will be returned to all callers, but only the first callers context will be used.
+// If multiple request to apply come in while the state is running,
+// they will all block until the net run completes, but the next run will
+// only run once. Errors from that Apply will be returned to all callers.
+//
+// If multiple Applys trigger a state run, the state run will only be stopped prematurely
+// if all Apply contexts are canceled.
 func (s *StateRunner) Apply(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -65,9 +73,10 @@ func (s *StateRunner) Apply(ctx context.Context) error {
 	}
 }
 
-// ApplyOnce will apply only if the state has not applied already, if state has already been applied, will return the last error
+// ApplyOnce will apply only if the state has not applied already.
+// If state has already been applied, will return the last error.
 //
-// ApplyOnce will block if the state is currently applying
+// Apply has the same blocking logic as Apply.
 func (s *StateRunner) ApplyOnce(ctx context.Context) error {
 	res := s.Result(ctx)
 	if !errors.Is(res.Err(), ErrStateNotRun) {
@@ -76,14 +85,14 @@ func (s *StateRunner) ApplyOnce(ctx context.Context) error {
 	return s.Apply(ctx)
 }
 
-// ErrStateNotRun is the error in the StateResult of a StateRunner that has not run yet
+// ErrStateNotRun indicates that the Runner has not been Applied.
 var ErrStateNotRun = errors.New("state has not yet run")
 
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
-// manage is the function that manages the state, runnning whenever a trigger is recieved
+// manage is the function that manages the state, runnning whenever a trigger is recieved.
 //
-// # Provided context can be used to stop
+// The provided context can be used to stop manage.
 //
 // TODO: Add rate limiting
 func (s *StateRunner) manage() {
@@ -255,9 +264,9 @@ func (s *StateRunner) runState(ctx context.Context) {
 	s.lastResult = &StateRunResult{changed, time.Now(), err}
 }
 
-// Result gets the StateRunner result
+// Result gets the StateRunner result from the last Apply.
 //
-// This will block if the state is currently running, unless ctx is canceled.
+// Result will block if the state is currently running.
 func (s *StateRunner) Result(ctx context.Context) *StateRunResult {
 	res := make(chan *StateRunResult)
 	select {
@@ -270,9 +279,10 @@ func (s *StateRunner) Result(ctx context.Context) *StateRunResult {
 	}
 }
 
-// NewStateRunner creates the state runner that will run, listening for triggers from Apply until ctx is canceled
+// NewStateRunner creates the state runner that will run, listening for triggers from Apply until ctx is canceled.
 //
-// Do not attempt to use the state runner after the context is canceled
+// It will run until ctx is canceled. Attempting to use the StateRunner after context is canceled will likely
+// cause deadlocks.
 func NewStateRunner(ctx context.Context, state State) *StateRunner {
 	log := log.With().Str("stateRunner", state.Name()).Logger()
 	s := &StateRunner{

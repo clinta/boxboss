@@ -2,18 +2,20 @@ package state
 
 import "context"
 
-// State interface is the interface that a state module must implement
+// State interface is the interface that a state module must implement.
 type State interface {
-	// Name is a name identifying the state, used in logging
+	// Name is a name identifying the state, used in logging.
 	Name() string
 
-	// Check checks whether or not changes are necessary before running them
+	// Check reports whether changes are required. If no changes are required, Run will not be called by the StateRunner.
 	Check(context.Context) (bool, error)
-	// Run runs the states, making system modifications
+	// Run makes modifications to the system bringing it into compliance. Reports whether changes were made during the process.
+	//
+	// A warning will be logged if Check indicated changes were required, but Run reports no changes were made.
 	Run(context.Context) (bool, error)
 }
 
-// BasicState is a simple implementation of the state interface
+// BasicState is a simple implementation of the state interface.
 type BasicState struct {
 	name  string
 	check func(context.Context) (bool, error)
@@ -32,7 +34,6 @@ func (b *BasicState) Run(ctx context.Context) (bool, error) {
 	return b.run(ctx)
 }
 
-// NewBasicState creates a new simple state
 func NewBasicState(name string, check func(context.Context) (bool, error), run func(context.Context) (bool, error)) *BasicState {
 	return &BasicState{
 		name:  name,
