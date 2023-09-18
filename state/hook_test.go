@@ -87,7 +87,7 @@ func TestPostCheckFail(t *testing.T) {
 	state.retRunChanges = true
 
 	var testErr = errors.New("testPostCheckHookErr")
-	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, _ error) error {
+	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
 		return testErr
 	})
 	err := runner.Apply(ctx)
@@ -108,7 +108,7 @@ func TestPostCheckSucceed(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, _ error) error {
+	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -128,7 +128,7 @@ func TestPostCheckRemove(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	rmBf := runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, _ error) error {
+	rmBf := runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -155,10 +155,8 @@ func TestPostCheckCheckFaild(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	state.retCheckErr = errors.New("check failed")
 
-	afcRan := false
-	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, err error) error {
-		assert.ErrorIs(err, state.retCheckErr)
-		afcRan = true
+	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
+		assert.FailNow("this should not have run")
 		return nil
 	})
 	err := runner.Apply(ctx)
@@ -169,7 +167,6 @@ func TestPostCheckCheckFaild(t *testing.T) {
 	assert.ErrorIs(res.Err(), state.retCheckErr)
 	assert.NotZero(res.Completed())
 	assert.Equal(len(state.checks), 1)
-	assert.True(afcRan)
 	assert.Zero(state.runs)
 	cancel()
 	goleak.VerifyNone(t)

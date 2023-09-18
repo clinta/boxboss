@@ -153,7 +153,7 @@ type preCheckHook struct {
 
 type postCheckHook struct {
 	hook
-	f func(ctx context.Context, changeNeeded bool, err error) error
+	f func(ctx context.Context, changeNeeded bool) error
 }
 
 type postRunHook struct {
@@ -223,17 +223,18 @@ func (s *StateRunner) AddCondition(name string, f func(context.Context) (conditi
 var ErrPostCheckHook = errors.New("post-check hook failed")
 
 // AddPostCheckHook adds a function that is run after the Check step of the Runner
+// They are only run if the all PreCheck hooks, and the Check itself succeeded.
 // If any of these functions fail, the run will fail returning the first function that errored
 //
 //	The provided function should check the provided context so that it can exit early if the runner is stopped
 //
 // Cancel ctx to remove the function from the state runner
-func (s *StateRunner) AddPostCheckHook(name string, f func(ctx context.Context, changeNeeded bool, err error) error) func() {
+func (s *StateRunner) AddPostCheckHook(name string, f func(ctx context.Context, changeNeeded bool) error) func() {
 	h, remove := s.newHook(name)
 	select {
 	case s.hookMgr.addPostCheckHook <- &postCheckHook{h,
-		func(ctx context.Context, changeNeeded bool, err error) error {
-			return wrapErr(ErrPostCheckHook, f(ctx, changeNeeded, err))
+		func(ctx context.Context, changeNeeded bool) error {
+			return wrapErr(ErrPostCheckHook, f(ctx, changeNeeded))
 		}}:
 	case <-s.ctx.Done():
 		h.removed()
@@ -243,11 +244,11 @@ func (s *StateRunner) AddPostCheckHook(name string, f func(ctx context.Context, 
 
 // AddChangesRequiredHook adds a function that is run after the check step, if changes are required
 func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context) error) func() {
-	return s.AddPostCheckHook("changesRequired: "+name, func(ctx context.Context, changeNeeded bool, err error) error {
-		if changeNeeded && err == nil {
+	return s.AddPostCheckHook("changesRequired: "+name, func(ctx context.Context, changeNeeded bool) error {
+		if changeNeeded {
 			return f(ctx)
 		}
-		return err
+		return nil
 	})
 }
 

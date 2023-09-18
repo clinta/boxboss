@@ -171,8 +171,8 @@ func (s *StateRunner) runState(ctx context.Context) {
 		for h := range s.hookMgr.preCheckHooks {
 			h := h
 			eg.Go(func() error {
-				log := log.With().Str("beforeCheckHook", h.name).Logger()
-				log.Debug().Msg("running beforeCheckHook")
+				log := log.With().Str("pre-check hook", h.name).Logger()
+				log.Debug().Msg("running pre-check hook")
 				return h.f(egCtx)
 			})
 		}
@@ -183,7 +183,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 				log.Debug().Msg("condition not met")
 				return
 			}
-			log.Error().Err(err).Msg("before hook failed")
+			log.Error().Err(err).Msg("pre-check hook failed")
 			s.lastResult = &StateRunResult{false, time.Now(), err}
 			return
 		}
@@ -202,16 +202,16 @@ func (s *StateRunner) runState(ctx context.Context) {
 		for h := range s.hookMgr.postCheckHooks {
 			h := h
 			eg.Go(func() error {
-				log := log.With().Str("afterCheckHook", h.name).Logger()
-				log.Debug().Msg("running afterCheckHook")
-				err := h.f(egCtx, changeNeeded, err)
+				log := log.With().Str("post-check hook", h.name).Logger()
+				log.Debug().Msg("running post-check hook")
+				err := h.f(egCtx, changeNeeded)
 				return err
 			})
 		}
 		err := eg.Wait()
 
 		if err != nil {
-			log.Error().Err(err).Msg("after check hook failed")
+			log.Error().Err(err).Msg("post-check hook failed")
 			s.lastResult = &StateRunResult{false, time.Now(), err}
 			return
 		}
@@ -244,10 +244,11 @@ func (s *StateRunner) runState(ctx context.Context) {
 	s.lastResult = &StateRunResult{changed, time.Now(), err}
 
 	{
+		//TODO postRunHooks need to run even if any of hte previous steps failed and returned early
 		for h := range s.hookMgr.postRunHooks {
 			go func(f *postRunHook) {
-				log := log.With().Str("afterHook", f.name).Logger()
-				log.Debug().Msg("running afterHook")
+				log := log.With().Str("post-run hook", f.name).Logger()
+				log.Debug().Msg("running post-run hook")
 				f.f(ctx, err)
 			}(h)
 		}
