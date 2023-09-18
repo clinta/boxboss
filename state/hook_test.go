@@ -16,16 +16,16 @@ func TestPreCheckFail(t *testing.T) {
 	state.retCheckChanges = true
 	state.retRunChanges = true
 
-	var bfErr = errors.New("testPreCheckHookErr")
+	var hookErr = errors.New("testPreCheckHookErr")
 	_ = runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
-		return bfErr
+		return hookErr
 	})
 	err := runner.Apply(ctx)
-	assert.ErrorIs(err, bfErr)
+	assert.ErrorIs(err, hookErr)
 	assert.ErrorIs(err, ErrPreCheckHook)
 	res := runner.Result(ctx)
 	assert.False(res.Changed())
-	assert.ErrorIs(res.Err(), bfErr)
+	assert.ErrorIs(res.Err(), hookErr)
 	assert.NotZero(res.Completed())
 	assert.Zero(state.checks)
 	assert.Zero(state.runs)
@@ -36,10 +36,10 @@ func TestPreCheckFail(t *testing.T) {
 func TestPreCheckSucceed(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
-	beforeHookTime := time.Time{}
+	hookTime := time.Time{}
 
 	_ = runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
-		beforeHookTime = time.Now()
+		hookTime = time.Now()
 		return nil
 	})
 	assert.Nil(runner.Apply(ctx))
@@ -47,7 +47,7 @@ func TestPreCheckSucceed(t *testing.T) {
 	assert.False(res.Changed())
 	assert.Nil(res.Err())
 	assert.NotZero(res.Completed())
-	assert.True(beforeHookTime.Before(state.checks[0]))
+	assert.True(hookTime.Before(state.checks[0]))
 	assert.Zero(state.runs)
 	cancel()
 	goleak.VerifyNone(t)
@@ -56,10 +56,10 @@ func TestPreCheckSucceed(t *testing.T) {
 func TestPreCheckRemove(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
-	beforeHookTime := time.Time{}
+	hookTime := time.Time{}
 
 	rmBf := runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
-		beforeHookTime = time.Now()
+		hookTime = time.Now()
 		return nil
 	})
 	assert.Nil(runner.Apply(ctx))
@@ -67,14 +67,14 @@ func TestPreCheckRemove(t *testing.T) {
 	assert.False(res.Changed())
 	assert.Nil(res.Err())
 	assert.NotZero(res.Completed())
-	assert.True(beforeHookTime.Before(state.checks[0]))
-	bft := beforeHookTime
+	assert.True(hookTime.Before(state.checks[0]))
+	bft := hookTime
 	assert.Zero(state.runs)
 
 	rmBf()
 
 	assert.Nil(runner.Apply(ctx))
-	assert.Equal(beforeHookTime, bft)
+	assert.Equal(hookTime, bft)
 
 	cancel()
 	goleak.VerifyNone(t)
@@ -106,10 +106,10 @@ func TestPostCheckFail(t *testing.T) {
 func TestPostCheckSucceed(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
-	beforeHookTime := time.Time{}
+	hookTime := time.Time{}
 
 	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
-		beforeHookTime = time.Now()
+		hookTime = time.Now()
 		return nil
 	})
 	assert.Nil(runner.Apply(ctx))
@@ -117,7 +117,7 @@ func TestPostCheckSucceed(t *testing.T) {
 	assert.False(res.Changed())
 	assert.Nil(res.Err())
 	assert.NotZero(res.Completed())
-	assert.True(beforeHookTime.After(state.checks[0]))
+	assert.True(hookTime.After(state.checks[0]))
 	assert.Zero(state.runs)
 	cancel()
 	goleak.VerifyNone(t)
@@ -128,7 +128,7 @@ func TestPostCheckRemove(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	rmBf := runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
+	rmh := runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -141,7 +141,7 @@ func TestPostCheckRemove(t *testing.T) {
 	bft := beforeHookTime
 	assert.Zero(state.runs)
 
-	rmBf()
+	rmh()
 
 	assert.Nil(runner.Apply(ctx))
 	assert.Equal(beforeHookTime, bft)
@@ -168,6 +168,83 @@ func TestPostCheckCheckFaild(t *testing.T) {
 	assert.NotZero(res.Completed())
 	assert.Equal(len(state.checks), 1)
 	assert.Zero(state.runs)
+	cancel()
+	goleak.VerifyNone(t)
+}
+
+func TestPostRunSucceed(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	postRunHookTime := time.Time{}
+	hookDone := make(chan struct{})
+
+	_ = runner.AddPostRunHook("testPostRunHook", func(ctx context.Context, _ *StateRunResult) {
+		postRunHookTime = time.Now()
+		close(hookDone)
+	})
+	assert.Nil(runner.Apply(ctx))
+	res := runner.Result(ctx)
+	assert.False(res.Changed())
+	assert.Nil(res.Err())
+	assert.NotZero(res.Completed())
+	<-hookDone
+	assert.True(postRunHookTime.After(state.checks[0]))
+	assert.Zero(state.runs)
+	cancel()
+	goleak.VerifyNone(t)
+}
+
+func TestPostRunRemove(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	state.retCheckChanges = true
+	state.retRunChanges = true
+	hookTime := time.Time{}
+	hookDone := make(chan struct{})
+
+	rmHook := runner.AddPostRunHook("testPostRunHook", func(ctx context.Context, _ *StateRunResult) {
+		hookTime = time.Now()
+		close(hookDone)
+	})
+	assert.Nil(runner.Apply(ctx))
+	res := runner.Result(ctx)
+	assert.True(res.Changed())
+	assert.Nil(res.Err())
+	assert.NotZero(res.Completed())
+	<-hookDone
+	assert.True(hookTime.After(state.checks[0]), "%s not after %s", hookTime, state.checks[0])
+	assert.True(hookTime.After(state.runs[0]), "%s not after %s", hookTime, state.runs[0])
+	bft := hookTime
+
+	rmHook()
+
+	assert.Nil(runner.Apply(ctx))
+	assert.Equal(hookTime, bft)
+
+	cancel()
+	goleak.VerifyNone(t)
+}
+
+func TestPostRunRunFaild(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	state.retCheckChanges = true
+	state.retRunErr = errors.New("check failed")
+	hookDone := make(chan struct{})
+
+	_ = runner.AddPostRunHook("testPostRunHook", func(ctx context.Context, res *StateRunResult) {
+		assert.ErrorIs(res.Err(), state.retRunErr)
+		close(hookDone)
+	})
+	err := runner.Apply(ctx)
+	assert.ErrorIs(err, state.retRunErr)
+	assert.ErrorIs(err, ErrRunFailed)
+	res := runner.Result(ctx)
+	assert.False(res.Changed())
+	assert.ErrorIs(res.Err(), state.retRunErr)
+	assert.NotZero(res.Completed())
+	assert.Equal(len(state.checks), 1)
+	<-hookDone
 	cancel()
 	goleak.VerifyNone(t)
 }
