@@ -158,7 +158,7 @@ type postCheckHook struct {
 
 type postRunHook struct {
 	hook
-	f func(ctx context.Context, err error)
+	f func(ctx context.Context, res *StateRunResult)
 }
 
 func wrapErr(parent error, child error) error {
@@ -270,8 +270,7 @@ func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context
 // PostRunHooks do not block returning the StateContext result. This means that a subsequent state run could run the PostRunHook before the previous one finished.
 //
 // AddPostRunHook returns a function that can be used to remove the hook.
-// TODO, this should take a result rather than just an err
-func (s *StateRunner) AddPostRunHook(name string, f func(ctx context.Context, err error)) func() {
+func (s *StateRunner) AddPostRunHook(name string, f func(ctx context.Context, res *StateRunResult)) func() {
 	h, remove := s.newHook(name)
 	select {
 	case s.hookMgr.addPostRunHook <- &postRunHook{h, f}:
@@ -283,18 +282,19 @@ func (s *StateRunner) AddPostRunHook(name string, f func(ctx context.Context, er
 
 // AddPostSuccessHook adds a PostRunHook that is run after a successful state run.
 func (s *StateRunner) AddPostSuccessHook(name string, f func(context.Context)) func() {
-	return s.AddPostRunHook("afterSuccess: "+name, func(ctx context.Context, err error) {
-		if err == nil {
+	return s.AddPostRunHook("afterSuccess: "+name, func(ctx context.Context, res *StateRunResult) {
+		if res.Err() == nil {
 			f(ctx)
 		}
 	})
 }
 
 // AddPostFailureHook adds a PostRunHook that is run after a failed state run.
-func (s *StateRunner) AddPostFailureHook(name string, f func(ctx context.Context, err error)) func() {
-	return s.AddPostRunHook("afterFailure: "+name, func(ctx context.Context, err error) {
+func (s *StateRunner) AddPostFailureHook(name string, f func(ctx context.Context, res *StateRunResult)) func() {
+	return s.AddPostRunHook("afterFailure: "+name, func(ctx context.Context, res *StateRunResult) {
+		err := res.Err()
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
-			f(ctx, err)
+			f(ctx, res)
 		}
 	})
 }

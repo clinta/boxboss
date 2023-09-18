@@ -162,7 +162,7 @@ func (s *StateRunner) runTrigger(triggerCtx context.Context) {
 			go func(f *postRunHook) {
 				log := log.With().Str("post-run hook", f.name).Logger()
 				log.Debug().Msg("running post-run hook")
-				f.f(triggerCtx, s.lastResult.err)
+				f.f(triggerCtx, s.lastResult)
 			}(h)
 		}
 	}
