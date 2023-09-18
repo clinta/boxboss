@@ -10,19 +10,19 @@ import (
 	"go.uber.org/goleak"
 )
 
-func TestBeforeCheckFail(t *testing.T) {
+func TestPreCheckFail(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	state.retCheckChanges = true
 	state.retRunChanges = true
 
-	var bfErr = errors.New("testBeforeCheckHookErr")
-	_ = runner.AddBeforeCheckHook("testBeforeCheckHook", func(ctx context.Context) error {
+	var bfErr = errors.New("testPreCheckHookErr")
+	_ = runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
 		return bfErr
 	})
 	err := runner.Apply(ctx)
 	assert.ErrorIs(err, bfErr)
-	assert.ErrorIs(err, ErrBeforeCheckHook)
+	assert.ErrorIs(err, ErrPreCheckHook)
 	res := runner.Result(ctx)
 	assert.False(res.Changed())
 	assert.ErrorIs(res.Err(), bfErr)
@@ -33,12 +33,12 @@ func TestBeforeCheckFail(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-func TestBeforeCheckSucceed(t *testing.T) {
+func TestPreCheckSucceed(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	_ = runner.AddBeforeCheckHook("testBeforeCheckHook", func(ctx context.Context) error {
+	_ = runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -53,12 +53,12 @@ func TestBeforeCheckSucceed(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-func TestBeforeCheckRemove(t *testing.T) {
+func TestPreCheckRemove(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	rmBf := runner.AddBeforeCheckHook("testBeforeCheckHook", func(ctx context.Context) error {
+	rmBf := runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -80,19 +80,19 @@ func TestBeforeCheckRemove(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-func TestAfterCheckFail(t *testing.T) {
+func TestPostCheckFail(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	state.retCheckChanges = true
 	state.retRunChanges = true
 
-	var testErr = errors.New("testAfterCheckHookErr")
-	_ = runner.AddAfterCheckHook("testAfterCheckHook", func(ctx context.Context, _ bool, _ error) error {
+	var testErr = errors.New("testPostCheckHookErr")
+	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, _ error) error {
 		return testErr
 	})
 	err := runner.Apply(ctx)
 	assert.ErrorIs(err, testErr)
-	assert.ErrorIs(err, ErrAfterCheckHook)
+	assert.ErrorIs(err, ErrPostCheckHook)
 	res := runner.Result(ctx)
 	assert.False(res.Changed())
 	assert.ErrorIs(res.Err(), testErr)
@@ -103,12 +103,12 @@ func TestAfterCheckFail(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-func TestAfterCheckSucceed(t *testing.T) {
+func TestPostCheckSucceed(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	_ = runner.AddAfterCheckHook("testAfterCheckHook", func(ctx context.Context, _ bool, _ error) error {
+	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, _ error) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -123,12 +123,12 @@ func TestAfterCheckSucceed(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-func TestAfterCheckRemove(t *testing.T) {
+func TestPostCheckRemove(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	rmBf := runner.AddAfterCheckHook("testAfterCheckHook", func(ctx context.Context, _ bool, _ error) error {
+	rmBf := runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, _ error) error {
 		beforeHookTime = time.Now()
 		return nil
 	})
@@ -150,13 +150,13 @@ func TestAfterCheckRemove(t *testing.T) {
 	goleak.VerifyNone(t)
 }
 
-func TestAfterCheckCheckFaild(t *testing.T) {
+func TestPostCheckCheckFaild(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel, state, runner := newTestRunner()
 	state.retCheckErr = errors.New("check failed")
 
 	afcRan := false
-	_ = runner.AddAfterCheckHook("testAfterCheckHook", func(ctx context.Context, _ bool, err error) error {
+	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool, err error) error {
 		assert.ErrorIs(err, state.retCheckErr)
 		afcRan = true
 		return nil

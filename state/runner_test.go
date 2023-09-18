@@ -195,7 +195,7 @@ func TestCancelingOneOfTwoTriggers(t *testing.T) {
 	go func() {
 		applyErr <- runner.Apply(triggerCtx)
 	}()
-	triggerCtx2, _ := context.WithCancel(ctx)
+	triggerCtx2 := ctx
 	applyErr2 := make(chan error)
 	go func() {
 		applyErr2 <- runner.Apply(triggerCtx2)
@@ -226,7 +226,7 @@ func TestCancelingOneTriggersWhileAnotherIsRunning(t *testing.T) {
 
 		}
 	}
-	triggerCtx, _ := context.WithCancel(ctx)
+	triggerCtx := ctx
 	applyErr := make(chan error)
 	go func() {
 		applyErr <- runner.Apply(triggerCtx)

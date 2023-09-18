@@ -168,7 +168,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 
 	{
 		eg, egCtx := errgroup.WithContext(ctx)
-		for h := range s.hookMgr.beforeCheckHooks {
+		for h := range s.hookMgr.preCheckHooks {
 			h := h
 			eg.Go(func() error {
 				log := log.With().Str("beforeCheckHook", h.name).Logger()
@@ -199,7 +199,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 
 	{
 		eg, egCtx := errgroup.WithContext(ctx)
-		for h := range s.hookMgr.afterCheckHooks {
+		for h := range s.hookMgr.postCheckHooks {
 			h := h
 			eg.Go(func() error {
 				log := log.With().Str("afterCheckHook", h.name).Logger()
@@ -244,8 +244,8 @@ func (s *StateRunner) runState(ctx context.Context) {
 	s.lastResult = &StateRunResult{changed, time.Now(), err}
 
 	{
-		for h := range s.hookMgr.afterRunHooks {
-			go func(f *afterRunHook) {
+		for h := range s.hookMgr.postRunHooks {
+			go func(f *postRunHook) {
 				log := log.With().Str("afterHook", f.name).Logger()
 				log.Debug().Msg("running afterHook")
 				f.f(ctx, err)
