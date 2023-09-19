@@ -185,6 +185,8 @@ var ErrPreCheckHook = errors.New("pre-check hook failed")
 // remaining PreCheckHooks. The first error will be returned.
 //
 // AddPreCheckHook returns a function that can be used to remove the hook.
+//
+// TODO: these are not hashed by f, so duplicates are possible, fix this
 func (s *StateRunner) AddPreCheckHook(name string, f func(context.Context) error) func() {
 	h, remove := s.newHook(name)
 	select {
