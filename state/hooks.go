@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -306,10 +307,42 @@ func (s *StateRunner) AddPostFailureHook(name string, f func(ctx context.Context
 // This will be wrapped in an ErrPreCheckHook.
 var ErrDependancyFailed = errors.New("dependency failed")
 
-// DependOn makes s dependent on d. If s.Apply is called, this will make sure that d.Apply has been called at least once.
-//
-// If d.ApplyOnce returns an error it will prevent s.Apply from running.
-func (s *StateRunner) DependOn(d *StateRunner) func() {
+func (s *StateRunner) relate(f func(s *StateRunner, t *StateRunner) func(), ts ...*StateRunner) func() {
+	wg := sync.WaitGroup{}
+	rCh := make(chan func())
+	for _, t := range ts {
+		if s == t {
+			continue
+		}
+		wg.Add(1)
+		go func(t *StateRunner) {
+			rCh <- f(s, t)
+			wg.Done()
+		}(t)
+	}
+	go func() {
+		wg.Wait()
+		close(rCh)
+	}()
+	removes := []func(){}
+	for r := range rCh {
+		removes = append(removes, r)
+	}
+
+	return func() {
+		wg := sync.WaitGroup{}
+		for _, r := range removes {
+			wg.Add(1)
+			go func(r func()) {
+				r()
+				wg.Done()
+			}(r)
+		}
+		wg.Wait()
+	}
+}
+
+func (s *StateRunner) dependOn(d *StateRunner) func() {
 	f := wrapErrf(ErrDependancyFailed, d.ApplyOnce)
 	remove := s.AddPreCheckHook("dependancy: "+d.state.Name(), f)
 	go func() {
@@ -317,6 +350,13 @@ func (s *StateRunner) DependOn(d *StateRunner) func() {
 		remove()
 	}()
 	return remove
+}
+
+// DependOn makes s dependent on d. If s.Apply is called, this will make sure that d.Apply has been called at least once.
+//
+// If d.ApplyOnce returns an error it will prevent s.Apply from running.
+func (s *StateRunner) DependOn(d ...*StateRunner) func() {
+	return s.relate((*StateRunner).dependOn, d...)
 }
 
 func LogErr(err error) {
@@ -327,10 +367,7 @@ func DiscardErr(error) {
 	//noop
 }
 
-// TriggerOnSuccess causes this s.Apply to be run whenever the t.Apply succeeds.
-//
-// cb is a callback to handle the result of s.Apply. Use LogErr to simply log the error, or DiscardErr to do nothing.
-func (s *StateRunner) TriggerOnSuccess(t *StateRunner, cb func(error)) func() {
+func (s *StateRunner) triggerOnSuccess(cb func(error), t *StateRunner) func() {
 	f := func(ctx context.Context) {
 		cb(s.Apply(ctx))
 	}
@@ -342,9 +379,17 @@ func (s *StateRunner) TriggerOnSuccess(t *StateRunner, cb func(error)) func() {
 	return remove
 }
 
-// BlockOn prevents s.Apply from running while t.Apply is running
-// TODO add ConflictsWith to add BlockOn in both directions.
-func (s *StateRunner) BlockOn(t *StateRunner) func() {
+// TriggerOnSuccess causes this s.Apply to be run whenever the t.Apply succeeds.
+//
+// cb is a callback to handle the result of s.Apply. Use LogErr to simply log the error, or DiscardErr to do nothing.
+func (s *StateRunner) TriggerOnSuccess(cb func(error), t ...*StateRunner) func() {
+	f := func(s *StateRunner, t *StateRunner) func() {
+		return s.triggerOnSuccess(cb, t)
+	}
+	return s.relate(f, t...)
+}
+
+func (s *StateRunner) blockOn(t *StateRunner) func() {
 	remove := s.AddPreCheckHook("blockOn: "+t.state.Name(), func(ctx context.Context) error {
 		t.Result(ctx)
 		return nil
@@ -354,4 +399,45 @@ func (s *StateRunner) BlockOn(t *StateRunner) func() {
 		remove()
 	}()
 	return remove
+}
+
+// BlockOn prevents s.Apply from running while t.Apply is running
+// TODO add ConflictsWith to add BlockOn in both directions.
+func (s *StateRunner) BlockOn(t ...*StateRunner) func() {
+	return s.relate((*StateRunner).blockOn, t...)
+}
+
+func (s *StateRunner) ConflictsWith(t ...*StateRunner) func() {
+	ts := append(t, s)
+	wg := sync.WaitGroup{}
+	rCh := make(chan func())
+	for _, s := range ts {
+		wg.Add(1)
+		go func(s *StateRunner) {
+			rCh <- s.BlockOn(ts...)
+			wg.Done()
+		}(s)
+	}
+
+	go func() {
+		wg.Wait()
+		close(rCh)
+	}()
+
+	removes := []func(){}
+	for r := range rCh {
+		removes = append(removes, r)
+	}
+
+	return func() {
+		wg := sync.WaitGroup{}
+		for _, r := range removes {
+			wg.Add(1)
+			go func(r func()) {
+				r()
+				wg.Done()
+			}(r)
+		}
+		wg.Wait()
+	}
 }
