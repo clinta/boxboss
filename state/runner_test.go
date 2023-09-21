@@ -52,7 +52,7 @@ func newTestRunner() (context.Context, func(), *testState, *StateRunner) {
 			return t.retRunChanges, t.retRunErr
 		},
 	)
-	return ctx, cancel, t, NewStateRunner(ctx, t)
+	return ctx, cancel, t, NewStateRunner(t)
 }
 
 func TestCheckFalse(t *testing.T) {
@@ -60,13 +60,11 @@ func TestCheckFalse(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	assert.Nil(runner.Apply(ctx))
+	changed, err := runner.Apply(ctx)
+	assert.Nil(err)
 	assert.Equal(len(state.checks), 1, "check should have run after apply")
 	assert.Zero(state.runs, "should not have run")
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	assert.False(changed)
 	cancel()
 	goleak.VerifyNone(t)
 }
@@ -78,16 +76,13 @@ func TestCheckTrueRunFalse(t *testing.T) {
 	state.retCheckChanges = true
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	assert.Nil(runner.Apply(ctx))
+	changed, err := runner.Apply(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
 	assert.Equal(h.count, 1, "did not get a warn log for check indicating changes but no changes made")
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	assert.False(changed)
+	assert.Nil(err)
 	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
-	assert.True(res.Completed().After(state.runs[0]), "runner should have completed after run function")
 	cancel()
 	goleak.VerifyNone(t)
 }
@@ -99,15 +94,12 @@ func TestCheckTrueRunTrue(t *testing.T) {
 	state.retRunChanges = true
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	assert.Nil(runner.Apply(ctx))
+	changed, err := runner.Apply(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
-	res := runner.Result(ctx)
-	assert.True(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	assert.True(changed)
+	assert.Nil(err)
 	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
-	assert.True(res.Completed().After(state.runs[0]), "runner should have completed after run function")
 	cancel()
 	goleak.VerifyNone(t)
 }
@@ -119,25 +111,19 @@ func TestCheckTrueRunTrueTwice(t *testing.T) {
 	state.retRunChanges = true
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	assert.Nil(runner.Apply(ctx))
+	changed, err := runner.Apply(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
-	res := runner.Result(ctx)
-	assert.True(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	assert.True(changed)
+	assert.Nil(err)
 	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
-	assert.True(res.Completed().After(state.runs[0]), "runner should have completed after run function")
 
-	assert.Nil(runner.Apply(ctx))
+	changed, err = runner.Apply(ctx)
 	assert.Equal(len(state.checks), 2)
 	assert.Equal(len(state.runs), 2)
-	res = runner.Result(ctx)
-	assert.True(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	assert.True(changed)
+	assert.Nil(err)
 	assert.True(state.checks[1].Before(state.runs[1]), "should have checked before run")
-	assert.True(res.Completed().After(state.runs[1]), "runner should have completed after run function")
 
 	cancel()
 	goleak.VerifyNone(t)
@@ -162,13 +148,12 @@ func TestCancelingTrigger(t *testing.T) {
 	triggerCtx, triggerCancel := context.WithCancel(ctx)
 	applyErr := make(chan error)
 	go func() {
-		applyErr <- runner.Apply(triggerCtx)
+		_, err := runner.Apply(triggerCtx)
+		applyErr <- err
 	}()
 	<-startCheck
 	triggerCancel()
 	assert.ErrorIs(<-applyErr, context.Canceled)
-	res := runner.Result(context.Background())
-	assert.ErrorIs(res.Err(), context.Canceled)
 	close(blockCheck)
 	cancel()
 	goleak.VerifyNone(t)
@@ -193,20 +178,20 @@ func TestCancelingOneOfTwoTriggers(t *testing.T) {
 	//log.Debug().Msg("wat")
 	applyErr := make(chan error)
 	go func() {
-		applyErr <- runner.Apply(triggerCtx)
+		_, err := runner.Apply(triggerCtx)
+		applyErr <- err
 	}()
 	triggerCtx2 := ctx
 	applyErr2 := make(chan error)
 	go func() {
-		applyErr2 <- runner.Apply(triggerCtx2)
+		_, err := runner.Apply(triggerCtx2)
+		applyErr2 <- err
 	}()
 	<-startCheck
 	triggerCancel()
 	assert.ErrorIs(<-applyErr, context.Canceled)
 	close(blockCheck)
 	assert.Nil(<-applyErr2)
-	res := runner.Result(ctx)
-	assert.Nil(res.Err())
 	cancel()
 	goleak.VerifyNone(t)
 }
@@ -229,31 +214,21 @@ func TestCancelingOneTriggersWhileAnotherIsRunning(t *testing.T) {
 	triggerCtx := ctx
 	applyErr := make(chan error)
 	go func() {
-		applyErr <- runner.Apply(triggerCtx)
+		_, err := runner.Apply(triggerCtx)
+		applyErr <- err
 	}()
 	triggerCtx2, triggerCancel2 := context.WithCancel(ctx)
 	applyErr2 := make(chan error)
 	<-startCheck
 	go func() {
-		applyErr2 <- runner.Apply(triggerCtx2)
+		_, err := runner.Apply(triggerCtx2)
+		applyErr2 <- err
 	}()
 	triggerCancel2()
 	err2 := <-applyErr2
 	assert.ErrorIs(err2, context.Canceled)
 	close(blockCheck)
 	assert.Nil(<-applyErr)
-	res := runner.Result(ctx)
-	assert.Nil(res.Err())
-	cancel()
-	goleak.VerifyNone(t)
-}
-
-func TestApplyOnce(t *testing.T) {
-	assert := assert.New(t)
-	ctx, cancel, state, runner := newTestRunner()
-	assert.Nil(runner.ApplyOnce(ctx))
-	assert.Nil(runner.ApplyOnce(ctx))
-	assert.Equal(len(state.checks), 1)
 	cancel()
 	goleak.VerifyNone(t)
 }

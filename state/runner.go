@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -25,35 +24,13 @@ var ErrRunFailed = errors.New("state run failed")
 // StateRunner launches a goroutine to accept addition and removal of hooks, and applies the state whenever Apply is called.
 // A StateRunner is safe for concurrent use by multiple goroutines.
 type StateRunner struct {
-	state         State
-	ctx           context.Context
-	log           zerolog.Logger
-	trigger       chan context.Context
-	getLastResult chan chan<- *StateRunResult
-	lastResult    *StateRunResult
-	hookMgr       *hookMgr
-}
-
-// StateRunResult holds the result of a state run.
-type StateRunResult struct {
-	changed bool
-	time    time.Time
-	err     error
-}
-
-// Changed reports whether changes were made during the state run.
-func (r *StateRunResult) Changed() bool {
-	return r.changed
-}
-
-// Completed is the time that the last state run stopped.
-func (r *StateRunResult) Completed() time.Time {
-	return r.time
-}
-
-// Err is the error returned by the last state run.
-func (r *StateRunResult) Err() error {
-	return r.err
+	state          State
+	lockCh         chan struct{}
+	priorityLockWg sync.WaitGroup
+	log            zerolog.Logger
+	postCheckHooks map[*postCheckHook]struct{}
+	preCheckHooks  map[*preCheckHook]struct{}
+	postRunHooks   map[*postRunHook]struct{}
 }
 
 // Apply will apply the state.
@@ -64,25 +41,16 @@ func (r *StateRunResult) Err() error {
 //
 // If multiple Applys trigger a state run, the state run will only be stopped prematurely
 // if all Apply contexts are canceled.
-func (s *StateRunner) Apply(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case s.trigger <- ctx:
-		return s.Result(ctx).err
+func (s *StateRunner) Apply(ctx context.Context) (changed bool, err error) {
+	if err := s.Wait(ctx); err != nil {
+		return false, err
 	}
-}
-
-// ApplyOnce will apply only if the state has not applied already.
-// If state has already been applied, will return the last error.
-//
-// Apply has the same blocking logic as Apply.
-func (s *StateRunner) ApplyOnce(ctx context.Context) error {
-	res := s.Result(ctx)
-	if !errors.Is(res.Err(), ErrStateNotRun) {
-		return res.err
+	unlock, err := s.lock(ctx)
+	defer unlock()
+	if err != nil {
+		return false, err
 	}
-	return s.Apply(ctx)
+	return s.runTrigger(ctx)
 }
 
 // ErrStateNotRun indicates that the Runner has not been Applied.
@@ -90,108 +58,29 @@ var ErrStateNotRun = errors.New("state has not yet run")
 
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
-// manage is the function that manages the state, runnning whenever a trigger is recieved.
-//
-// The provided context can be used to stop manage.
-//
-// TODO: Add rate limiting
-func (s *StateRunner) manage() {
-	log := s.log
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			log.Debug().Msg("shutting down runner")
-			return
-		case resCh := <-s.getLastResult:
-			resCh <- s.lastResult
-		case f := <-s.hookMgr.hookOp:
-			f()
-		case tCtx := <-s.trigger:
-			log.Debug().Msg("triggered")
-			s.runTrigger(tCtx)
-		}
-	}
-}
-
-func (s *StateRunner) runTrigger(triggerCtx context.Context) {
-	// triggerCtx will be Done if all trigger contexts are canceled
-	triggersCtx, triggersCancel := context.WithCancel(s.ctx)
-	triggersWg := sync.WaitGroup{}
-
-	addTrigger := func(tCtx context.Context) {
-		triggersWg.Add(1)
-		go func() {
-			select {
-			case <-tCtx.Done():
-			case <-triggersCtx.Done():
-			}
-			triggersWg.Done()
-		}()
-	}
-
-	addTrigger(triggerCtx)
-
-	// collect all pending triggers and hook operations before continuing
-	for {
-		select {
-		case <-triggersCtx.Done():
-			triggersCancel()
-			return
-		case tCtx := <-s.trigger:
-			addTrigger(tCtx)
-			continue
-		case f := <-s.hookMgr.hookOp:
-			f()
-			continue
-		default:
-		}
-		break
-	}
-
-	go func() {
-		// cancel triggerCtx if all triggers contexts are canceled
-		triggersWg.Wait()
-		triggersCancel()
-	}()
-
-	s.runState(triggersCtx)
-
+func (s *StateRunner) runTrigger(ctx context.Context) (bool, error) {
+	changed, err := s.runState(ctx)
 	{
-		for h := range s.hookMgr.postRunHooks {
+		for h := range s.postRunHooks {
 			go func(f *postRunHook) {
-				log := log.With().Str("post-run hook", f.name).Logger()
+				//log := log.With().Str("post-run hook", f.name).Logger()
 				log.Debug().Msg("running post-run hook")
-				f.f(triggerCtx, s.lastResult)
+				f.f(ctx, changed, err)
 			}(h)
 		}
 	}
-
-	triggersCancel()
-	triggersWg.Wait()
-
-	// Return any waiting results before listening for new trigggers
-	for {
-		select {
-		case resCh := <-s.getLastResult:
-			resCh <- s.lastResult
-			continue
-		default:
-		}
-		break
-	}
+	return changed, err
 }
 
-func (s *StateRunner) runState(ctx context.Context) {
-	s.lastResult = &StateRunResult{false, time.Now(), s.lastResult.err}
+func (s *StateRunner) runState(ctx context.Context) (bool, error) {
 	log := s.log
 
 	{
 		eg, egCtx := errgroup.WithContext(ctx)
-		for h := range s.hookMgr.preCheckHooks {
+		for h := range s.preCheckHooks {
 			h := h
 			eg.Go(func() error {
-				log := log.With().Str("pre-check hook", h.name).Logger()
+				//log := log.With().Str("pre-check hook", h.name).Logger()
 				log.Debug().Msg("running pre-check hook")
 				return h.f(egCtx)
 			})
@@ -201,11 +90,10 @@ func (s *StateRunner) runState(ctx context.Context) {
 			if errors.Is(err, ErrConditionNotMet) {
 				log := log.With().Err(err).Logger()
 				log.Debug().Msg("condition not met")
-				return
+				return false, nil
 			}
 			log.Error().Err(err).Msg("pre-check hook failed")
-			s.lastResult = &StateRunResult{false, time.Now(), err}
-			return
+			return false, err
 		}
 	}
 
@@ -213,16 +101,15 @@ func (s *StateRunner) runState(ctx context.Context) {
 	changeNeeded, err := s.state.Check(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("check failed")
-		s.lastResult = &StateRunResult{false, time.Now(), errors.Join(ErrCheckFailed, err)}
-		return
+		return false, errors.Join(ErrCheckFailed, err)
 	}
 
 	{
 		eg, egCtx := errgroup.WithContext(ctx)
-		for h := range s.hookMgr.postCheckHooks {
+		for h := range s.postCheckHooks {
 			h := h
 			eg.Go(func() error {
-				log := log.With().Str("post-check hook", h.name).Logger()
+				//log := log.With().Str("post-check hook", h.name).Logger()
 				log.Debug().Msg("running post-check hook")
 				err := h.f(egCtx, changeNeeded)
 				return err
@@ -232,8 +119,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 
 		if err != nil {
 			log.Error().Err(err).Msg("post-check hook failed")
-			s.lastResult = &StateRunResult{false, time.Now(), err}
-			return
+			return false, err
 		}
 	}
 
@@ -244,8 +130,7 @@ func (s *StateRunner) runState(ctx context.Context) {
 
 	if !changeNeeded {
 		log.Debug().Msg("check indicates no changes required")
-		s.lastResult = &StateRunResult{false, time.Now(), err}
-		return
+		return false, err
 	}
 
 	log.Debug().Msg("running")
@@ -261,39 +146,88 @@ func (s *StateRunner) runState(ctx context.Context) {
 		log.Error().Err(err).Msg("run failed")
 	}
 
-	s.lastResult = &StateRunResult{changed, time.Now(), err}
+	return changed, err
 }
 
-// Result gets the StateRunner result from the last Apply.
-//
-// Result will block if the state is currently running.
-func (s *StateRunner) Result(ctx context.Context) *StateRunResult {
-	res := make(chan *StateRunResult)
+func (s *StateRunner) lock(ctx context.Context) (unlock func(), err error) {
+	s.priorityLockWg.Wait()
 	select {
-	case s.getLastResult <- res:
-		return <-res
+	case s.lockCh <- struct{}{}:
+		ctx, cancel := context.WithCancel(ctx)
+		context.AfterFunc(ctx, func() { <-s.lockCh })
+		return cancel, nil
 	case <-ctx.Done():
-		return &StateRunResult{false, time.Time{}, ctx.Err()}
-	case <-s.ctx.Done():
-		return &StateRunResult{false, time.Time{}, s.ctx.Err()}
+		return func() {}, ctx.Err()
 	}
+}
+
+func (s *StateRunner) priorityLock(ctx context.Context) (unlock func(), err error) {
+	s.priorityLockWg.Add(1)
+	defer s.priorityLockWg.Done()
+	select {
+	case s.lockCh <- struct{}{}:
+		ctx, cancel := context.WithCancel(ctx)
+		context.AfterFunc(ctx, func() { <-s.lockCh })
+		return cancel, nil
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
+	}
+}
+
+// Wait will block until any hook addition or removals, or state applications are complete
+func (s *StateRunner) Wait(ctx context.Context) error {
+	var removing bool
+	var err error
+	for removing, err = s.checkRemovedHooks(ctx); removing && err == nil; removing, err = s.checkRemovedHooks(ctx) {
+		// keep checking
+	}
+	return err
+}
+
+func (s *StateRunner) checkRemovedHooks(ctx context.Context) (bool, error) {
+	unlock, err := s.lock(ctx)
+	defer unlock()
+	if err != nil {
+		return false, err
+	}
+	for h := range s.preCheckHooks {
+		select {
+		case <-h.ctx.Done():
+			return true, err
+		default:
+		}
+	}
+	for h := range s.postCheckHooks {
+		select {
+		case <-h.ctx.Done():
+			return true, err
+		default:
+		}
+	}
+	for h := range s.postRunHooks {
+		select {
+		case <-h.ctx.Done():
+			return true, err
+		default:
+		}
+	}
+	return false, err
 }
 
 // NewStateRunner creates the state runner that will run, listening for triggers from Apply until ctx is canceled.
 //
 // It will run until ctx is canceled. Attempting to use the StateRunner after context is canceled will likely
 // cause deadlocks.
-func NewStateRunner(ctx context.Context, state State) *StateRunner {
+func NewStateRunner(state State) *StateRunner {
 	log := log.With().Str("stateRunner", state.Name()).Logger()
 	s := &StateRunner{
-		state:         state,
-		ctx:           ctx,
-		log:           log,
-		trigger:       make(chan context.Context),
-		getLastResult: make(chan chan<- *StateRunResult),
-		lastResult:    &StateRunResult{false, time.Time{}, ErrStateNotRun},
-		hookMgr:       newHookMgr(ctx, log),
+		state:          state,
+		lockCh:         make(chan struct{}, 1),
+		priorityLockWg: sync.WaitGroup{},
+		log:            log,
+		postCheckHooks: map[*postCheckHook]struct{}{},
+		preCheckHooks:  map[*preCheckHook]struct{}{},
+		postRunHooks:   map[*postRunHook]struct{}{},
 	}
-	go s.manage()
 	return s
 }

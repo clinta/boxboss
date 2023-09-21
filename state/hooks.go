@@ -3,163 +3,23 @@ package state
 import (
 	"context"
 	"errors"
-	"sync"
-
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
-type hookMgr struct {
-	ctx context.Context
-	log zerolog.Logger
-
-	hookOp chan func()
-
-	addPreCheckHook chan *preCheckHook
-	rmPreCheckHook  chan *preCheckHook
-	preCheckHooks   map[*preCheckHook]struct{}
-
-	addPostCheckHook chan *postCheckHook
-	rmPostCheckHook  chan *postCheckHook
-	postCheckHooks   map[*postCheckHook]struct{}
-
-	addPostRunHook chan *postRunHook
-	rmPostRunHook  chan *postRunHook
-	postRunHooks   map[*postRunHook]struct{}
-}
-
-func newHookMgr(ctx context.Context, log zerolog.Logger) *hookMgr {
-	h := &hookMgr{
-		ctx:              ctx,
-		log:              log,
-		hookOp:           make(chan func()),
-		addPreCheckHook:  make(chan *preCheckHook),
-		rmPreCheckHook:   make(chan *preCheckHook),
-		preCheckHooks:    map[*preCheckHook]struct{}{},
-		addPostCheckHook: make(chan *postCheckHook),
-		rmPostCheckHook:  make(chan *postCheckHook),
-		postCheckHooks:   map[*postCheckHook]struct{}{},
-		addPostRunHook:   make(chan *postRunHook),
-		rmPostRunHook:    make(chan *postRunHook),
-		postRunHooks:     map[*postRunHook]struct{}{},
-	}
-	go h.manage()
-	return h
-}
-
-func (h *hookMgr) manage() {
-	log := h.log
-	for {
-		select {
-		case <-h.ctx.Done():
-			log.Debug().Msg("shutting down hook manager")
-			return
-
-		case f := <-h.addPreCheckHook:
-			h.hookOp <- func() {
-				log := log.With().Str("pre-check hook", f.name).Logger()
-				log.Debug().Msg("adding pre check hook")
-				go func() {
-					// f.ctx is a child of s.ctx, so no need to check both
-					<-f.ctx.Done()
-					select {
-					case <-h.ctx.Done():
-						// removeCtx is a child of s.ctx, so no need to call removed()
-					case h.rmPreCheckHook <- f:
-					}
-				}()
-				h.preCheckHooks[f] = struct{}{}
-			}
-
-		case f := <-h.rmPreCheckHook:
-			h.hookOp <- func() {
-				log := log.With().Str("pre-check hook", f.name).Logger()
-				log.Debug().Msg("removing pre-check hook")
-				delete(h.preCheckHooks, f)
-				f.removed()
-			}
-
-		case f := <-h.addPostCheckHook:
-			h.hookOp <- func() {
-				log := log.With().Str("post-check hook", f.name).Logger()
-				log.Debug().Msg("adding post-check hook")
-				go func() {
-					<-f.ctx.Done()
-					select {
-					case <-h.ctx.Done():
-					case h.rmPostCheckHook <- f:
-					}
-				}()
-				h.postCheckHooks[f] = struct{}{}
-			}
-
-		case f := <-h.rmPostCheckHook:
-			h.hookOp <- func() {
-				log := log.With().Str("post-check hook", f.name).Logger()
-				log.Debug().Msg("removing post-check hook")
-				delete(h.postCheckHooks, f)
-				f.removed()
-			}
-
-		case f := <-h.addPostRunHook:
-			h.hookOp <- func() {
-				log := log.With().Str("post-run hook", f.name).Logger()
-				log.Debug().Msg("adding post-run hook")
-				go func() {
-					<-f.ctx.Done()
-					select {
-					case <-h.ctx.Done():
-					case h.rmPostRunHook <- f:
-					}
-				}()
-				h.postRunHooks[f] = struct{}{}
-			}
-
-		case f := <-h.rmPostRunHook:
-			h.hookOp <- func() {
-				log := log.With().Str("post-run hook", f.name).Logger()
-				log.Debug().Msg("removing post-run hook")
-				delete(h.postRunHooks, f)
-				f.removed()
-			}
-		}
-	}
-}
-
-type hook struct {
-	ctx     context.Context
-	removed func()
-	name    string
-}
-
-func (s *StateRunner) newHook(name string) (hook, func()) {
-	ctx, cancel := context.WithCancel(s.ctx)
-	removedCtx, removed := context.WithCancel(s.ctx)
-	h := hook{
-		ctx:     ctx,
-		removed: removed,
-		name:    name,
-	}
-	remove := func() {
-		cancel()
-		<-removedCtx.Done()
-	}
-	return h, remove
-}
+// TODO: Use contexts for names, add loggers
 
 type preCheckHook struct {
-	hook
-	f func(ctx context.Context) error
+	ctx context.Context
+	f   func(ctx context.Context) error
 }
 
 type postCheckHook struct {
-	hook
-	f func(ctx context.Context, changeNeeded bool) error
+	ctx context.Context
+	f   func(ctx context.Context, changeNeeded bool) error
 }
 
 type postRunHook struct {
-	hook
-	f func(ctx context.Context, res *StateRunResult)
+	ctx context.Context
+	f   func(ctx context.Context, changed bool, err error)
 }
 
 func wrapErr(parent error, child error) error {
@@ -167,12 +27,6 @@ func wrapErr(parent error, child error) error {
 		return nil
 	}
 	return errors.Join(parent, child)
-}
-
-func wrapErrf(parent error, f func(context.Context) error) func(context.Context) error {
-	return func(ctx context.Context) error {
-		return wrapErr(parent, f(ctx))
-	}
 }
 
 // ErrPreCheckHook is returned if a PreCheckHook fails. It will wrap underlying errors.
@@ -186,16 +40,23 @@ var ErrPreCheckHook = errors.New("pre-check hook failed")
 // remaining PreCheckHooks. The first error will be returned.
 //
 // AddPreCheckHook returns a function that can be used to remove the hook.
-//
-// TODO: these are not hashed by f, so duplicates are possible, fix this
-func (s *StateRunner) AddPreCheckHook(name string, f func(context.Context) error) func() {
-	h, remove := s.newHook(name)
-	select {
-	case s.hookMgr.addPreCheckHook <- &preCheckHook{h, wrapErrf(ErrPreCheckHook, f)}:
-	case <-s.ctx.Done():
-		h.removed()
+func (s *StateRunner) AddPreCheckHook(ctx context.Context, f func(context.Context) error) error {
+	unlock, err := s.priorityLock(ctx)
+	defer unlock()
+	if err != nil {
+		return err
 	}
-	return remove
+	hf := func(ctx context.Context) error {
+		return wrapErr(ErrPreCheckHook, f(ctx))
+	}
+	h := &preCheckHook{ctx, hf}
+	s.preCheckHooks[h] = struct{}{}
+	context.AfterFunc(ctx, func() {
+		unlock, _ = s.priorityLock(context.Background())
+		defer unlock()
+		delete(s.preCheckHooks, h)
+	})
+	return nil
 }
 
 // ErrConditionNotMet signals that a precheck condition was not met and the state should not run,
@@ -216,18 +77,15 @@ var ErrCondition = errors.New("condition hook failed")
 // not be applied. But Apply will not return an error.
 //
 // AddCondition returns a function that can be used to remove the hook.
-func (s *StateRunner) AddCondition(name string, f func(context.Context) (conditionMet bool, err error)) func() {
-	bf := func(ctx context.Context) error {
+func (s *StateRunner) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error)) error {
+	cf := func(ctx context.Context) error {
 		v, err := f(ctx)
-		if err != nil {
-			return err
-		}
-		if !v {
+		if err == nil && !v {
 			return ErrConditionNotMet
 		}
-		return nil
+		return wrapErr(ErrCondition, err)
 	}
-	return s.AddPreCheckHook("condition: "+name, wrapErrf(ErrCondition, bf))
+	return s.AddPreCheckHook(ctx, cf)
 }
 
 // ErrPostCheckHook is returned if a PostCheckHook fails causing the Apply to fail
@@ -244,22 +102,28 @@ var ErrPostCheckHook = errors.New("post-check hook failed")
 // remaining PostCheckHooks. The first error will be returned.
 //
 // AddPostCheckHook returns a function that can be used to remove the hook.
-func (s *StateRunner) AddPostCheckHook(name string, f func(ctx context.Context, changeNeeded bool) error) func() {
-	h, remove := s.newHook(name)
-	select {
-	case s.hookMgr.addPostCheckHook <- &postCheckHook{h,
+func (s *StateRunner) AddPostCheckHook(ctx context.Context, f func(ctx context.Context, changeNeeded bool) error) error {
+	unlock, err := s.priorityLock(ctx)
+	defer unlock()
+	if err != nil {
+		return err
+	}
+	h := &postCheckHook{ctx,
 		func(ctx context.Context, changeNeeded bool) error {
 			return wrapErr(ErrPostCheckHook, f(ctx, changeNeeded))
-		}}:
-	case <-s.ctx.Done():
-		h.removed()
-	}
-	return remove
+		}}
+	s.postCheckHooks[h] = struct{}{}
+	context.AfterFunc(ctx, func() {
+		unlock, _ = s.priorityLock(context.Background())
+		defer unlock()
+		delete(s.postCheckHooks, h)
+	})
+	return nil
 }
 
 // AddChangesRequiredHook adds a function that is run after the check step, only if changes are required.
-func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context) error) func() {
-	return s.AddPostCheckHook("changesRequired: "+name, func(ctx context.Context, changeNeeded bool) error {
+func (s *StateRunner) AddChangesRequiredHook(ctx context.Context, f func(context.Context) error) error {
+	return s.AddPostCheckHook(ctx, func(ctx context.Context, changeNeeded bool) error {
 		if changeNeeded {
 			return f(ctx)
 		}
@@ -273,35 +137,41 @@ func (s *StateRunner) AddChangesRequiredHook(name string, f func(context.Context
 // PostRunHooks do not block returning the StateContext result. This means that a subsequent state run could run the PostRunHook before the previous one finished.
 //
 // AddPostRunHook returns a function that can be used to remove the hook.
-func (s *StateRunner) AddPostRunHook(name string, f func(ctx context.Context, res *StateRunResult)) func() {
-	h, remove := s.newHook(name)
-	select {
-	case s.hookMgr.addPostRunHook <- &postRunHook{h, f}:
-	case <-s.ctx.Done():
-		h.removed()
+func (s *StateRunner) AddPostRunHook(ctx context.Context, f func(ctx context.Context, changed bool, err error)) error {
+	unlock, err := s.priorityLock(ctx)
+	defer unlock()
+	if err != nil {
+		return err
 	}
-	return remove
+	h := &postRunHook{ctx, f}
+	s.postRunHooks[h] = struct{}{}
+	context.AfterFunc(ctx, func() {
+		unlock, _ = s.priorityLock(context.Background())
+		defer unlock()
+		delete(s.postRunHooks, h)
+	})
+	return nil
 }
 
 // AddPostSuccessHook adds a PostRunHook that is run after a successful state run.
-func (s *StateRunner) AddPostSuccessHook(name string, f func(context.Context)) func() {
-	return s.AddPostRunHook("afterSuccess: "+name, func(ctx context.Context, res *StateRunResult) {
-		if res.Err() == nil {
-			f(ctx)
+func (s *StateRunner) AddPostSuccessHook(ctx context.Context, f func(ctx context.Context, changes bool)) error {
+	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
+		if err == nil {
+			f(ctx, changes)
 		}
 	})
 }
 
 // AddPostFailureHook adds a PostRunHook that is run after a failed state run.
-func (s *StateRunner) AddPostFailureHook(name string, f func(ctx context.Context, res *StateRunResult)) func() {
-	return s.AddPostRunHook("afterFailure: "+name, func(ctx context.Context, res *StateRunResult) {
-		err := res.Err()
+func (s *StateRunner) AddPostFailureHook(ctx context.Context, f func(ctx context.Context, err error)) error {
+	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
-			f(ctx, res)
+			f(ctx, err)
 		}
 	})
 }
 
+/*
 // ErrDependancyFailed is returned by the state when a dependency failed.
 //
 // This will be wrapped in an ErrPreCheckHook.
@@ -343,7 +213,7 @@ func (s *StateRunner) relate(f func(s *StateRunner, t *StateRunner) func(), ts .
 }
 
 func (s *StateRunner) dependOn(d *StateRunner) func() {
-	f := wrapErrf(ErrDependancyFailed, d.ApplyOnce)
+	f := wrapErrf(ErrDependancyFailed, func(ctx context.Context) error { _, err := d.ApplyOnce(ctx); return err })
 	remove := s.AddPreCheckHook("dependancy: "+d.state.Name(), f)
 	go func() {
 		<-d.ctx.Done()
@@ -369,7 +239,8 @@ func DiscardErr(error) {
 
 func (s *StateRunner) triggerOnSuccess(cb func(error), t *StateRunner) func() {
 	f := func(ctx context.Context) {
-		cb(s.Apply(ctx))
+		_, err := s.Apply(ctx)
+		cb(err)
 	}
 	remove := t.AddPostSuccessHook("triggering: "+s.state.Name(), f)
 	go func() {
@@ -441,3 +312,4 @@ func (s *StateRunner) ConflictsWith(t ...*StateRunner) func() {
 		wg.Wait()
 	}
 }
+*/

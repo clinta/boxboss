@@ -17,16 +17,13 @@ func TestPreCheckFail(t *testing.T) {
 	state.retRunChanges = true
 
 	var hookErr = errors.New("testPreCheckHookErr")
-	_ = runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
+	_ = runner.AddPreCheckHook(ctx, func(ctx context.Context) error {
 		return hookErr
 	})
-	err := runner.Apply(ctx)
+	changed, err := runner.Apply(ctx)
+	assert.False(changed)
 	assert.ErrorIs(err, hookErr)
 	assert.ErrorIs(err, ErrPreCheckHook)
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.ErrorIs(res.Err(), hookErr)
-	assert.NotZero(res.Completed())
 	assert.Zero(state.checks)
 	assert.Zero(state.runs)
 	cancel()
@@ -38,15 +35,14 @@ func TestPreCheckSucceed(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	hookTime := time.Time{}
 
-	_ = runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
+	_ = runner.AddPreCheckHook(ctx, func(ctx context.Context) error {
 		hookTime = time.Now()
 		return nil
 	})
-	assert.Nil(runner.Apply(ctx))
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	changed, err := runner.Apply(ctx)
+	assert.Nil(err)
+	assert.False(changed)
+	assert.Nil(err)
 	assert.True(hookTime.Before(state.checks[0]))
 	assert.Zero(state.runs)
 	cancel()
@@ -58,22 +54,22 @@ func TestPreCheckRemove(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	hookTime := time.Time{}
 
-	rmBf := runner.AddPreCheckHook("testPreCheckHook", func(ctx context.Context) error {
+	hCtx, rmh := context.WithCancel(ctx)
+	assert.Nil(runner.AddPreCheckHook(hCtx, func(ctx context.Context) error {
 		hookTime = time.Now()
 		return nil
-	})
-	assert.Nil(runner.Apply(ctx))
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	}))
+	changed, err := runner.Apply(ctx)
+	assert.False(changed)
+	assert.Nil(err)
 	assert.True(hookTime.Before(state.checks[0]))
 	bft := hookTime
 	assert.Zero(state.runs)
 
-	rmBf()
+	rmh()
 
-	assert.Nil(runner.Apply(ctx))
+	_, err = runner.Apply(ctx)
+	assert.Nil(err)
 	assert.Equal(hookTime, bft)
 
 	cancel()
@@ -87,16 +83,13 @@ func TestPostCheckFail(t *testing.T) {
 	state.retRunChanges = true
 
 	var testErr = errors.New("testPostCheckHookErr")
-	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
+	_ = runner.AddPostCheckHook(ctx, func(ctx context.Context, _ bool) error {
 		return testErr
 	})
-	err := runner.Apply(ctx)
+	changed, err := runner.Apply(ctx)
 	assert.ErrorIs(err, testErr)
 	assert.ErrorIs(err, ErrPostCheckHook)
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.ErrorIs(res.Err(), testErr)
-	assert.NotZero(res.Completed())
+	assert.False(changed)
 	assert.Equal(len(state.checks), 1)
 	assert.Zero(state.runs)
 	cancel()
@@ -108,15 +101,13 @@ func TestPostCheckSucceed(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	hookTime := time.Time{}
 
-	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
+	_ = runner.AddPostCheckHook(ctx, func(ctx context.Context, _ bool) error {
 		hookTime = time.Now()
 		return nil
 	})
-	assert.Nil(runner.Apply(ctx))
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	changed, err := runner.Apply(ctx)
+	assert.False(changed)
+	assert.Nil(err)
 	assert.True(hookTime.After(state.checks[0]))
 	assert.Zero(state.runs)
 	cancel()
@@ -128,22 +119,22 @@ func TestPostCheckRemove(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	beforeHookTime := time.Time{}
 
-	rmh := runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
+	hCtx, rmh := context.WithCancel(ctx)
+	assert.Nil(runner.AddPostCheckHook(hCtx, func(ctx context.Context, _ bool) error {
 		beforeHookTime = time.Now()
 		return nil
-	})
-	assert.Nil(runner.Apply(ctx))
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	}))
+	changed, err := runner.Apply(ctx)
+	assert.False(changed)
+	assert.Nil(err)
 	assert.True(beforeHookTime.After(state.checks[0]))
 	bft := beforeHookTime
 	assert.Zero(state.runs)
 
 	rmh()
 
-	assert.Nil(runner.Apply(ctx))
+	_, err = runner.Apply(ctx)
+	assert.Nil(err)
 	assert.Equal(beforeHookTime, bft)
 
 	cancel()
@@ -155,17 +146,14 @@ func TestPostCheckCheckFaild(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	state.retCheckErr = errors.New("check failed")
 
-	_ = runner.AddPostCheckHook("testPostCheckHook", func(ctx context.Context, _ bool) error {
+	_ = runner.AddPostCheckHook(ctx, func(ctx context.Context, _ bool) error {
 		assert.FailNow("this should not have run")
 		return nil
 	})
-	err := runner.Apply(ctx)
+	changed, err := runner.Apply(ctx)
 	assert.ErrorIs(err, state.retCheckErr)
 	assert.ErrorIs(err, ErrCheckFailed)
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.ErrorIs(res.Err(), state.retCheckErr)
-	assert.NotZero(res.Completed())
+	assert.False(changed)
 	assert.Equal(len(state.checks), 1)
 	assert.Zero(state.runs)
 	cancel()
@@ -178,15 +166,13 @@ func TestPostRunSucceed(t *testing.T) {
 	postRunHookTime := time.Time{}
 	hookDone := make(chan struct{})
 
-	_ = runner.AddPostRunHook("testPostRunHook", func(ctx context.Context, _ *StateRunResult) {
+	_ = runner.AddPostRunHook(ctx, func(ctx context.Context, _ bool, _ error) {
 		postRunHookTime = time.Now()
 		close(hookDone)
 	})
-	assert.Nil(runner.Apply(ctx))
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	changed, err := runner.Apply(ctx)
+	assert.Nil(err)
+	assert.False(changed)
 	<-hookDone
 	assert.True(postRunHookTime.After(state.checks[0]))
 	assert.Zero(state.runs)
@@ -202,23 +188,23 @@ func TestPostRunRemove(t *testing.T) {
 	hookTime := time.Time{}
 	hookDone := make(chan struct{})
 
-	rmHook := runner.AddPostRunHook("testPostRunHook", func(ctx context.Context, _ *StateRunResult) {
+	hCtx, rmh := context.WithCancel(ctx)
+	assert.Nil(runner.AddPostRunHook(hCtx, func(ctx context.Context, _ bool, _ error) {
 		hookTime = time.Now()
 		close(hookDone)
-	})
-	assert.Nil(runner.Apply(ctx))
-	res := runner.Result(ctx)
-	assert.True(res.Changed())
-	assert.Nil(res.Err())
-	assert.NotZero(res.Completed())
+	}))
+	changed, err := runner.Apply(ctx)
+	assert.True(changed)
+	assert.Nil(err)
 	<-hookDone
 	assert.True(hookTime.After(state.checks[0]), "%s not after %s", hookTime, state.checks[0])
 	assert.True(hookTime.After(state.runs[0]), "%s not after %s", hookTime, state.runs[0])
 	bft := hookTime
 
-	rmHook()
+	rmh()
 
-	assert.Nil(runner.Apply(ctx))
+	_, err = runner.Apply(ctx)
+	assert.Nil(err)
 	assert.Equal(hookTime, bft)
 
 	cancel()
@@ -232,17 +218,14 @@ func TestPostRunRunFaild(t *testing.T) {
 	state.retRunErr = errors.New("check failed")
 	hookDone := make(chan struct{})
 
-	_ = runner.AddPostRunHook("testPostRunHook", func(ctx context.Context, res *StateRunResult) {
-		assert.ErrorIs(res.Err(), state.retRunErr)
+	_ = runner.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
+		assert.ErrorIs(err, state.retRunErr)
 		close(hookDone)
 	})
-	err := runner.Apply(ctx)
+	changed, err := runner.Apply(ctx)
+	assert.False(changed)
 	assert.ErrorIs(err, state.retRunErr)
 	assert.ErrorIs(err, ErrRunFailed)
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.ErrorIs(res.Err(), state.retRunErr)
-	assert.NotZero(res.Completed())
 	assert.Equal(len(state.checks), 1)
 	<-hookDone
 	cancel()
@@ -254,26 +237,22 @@ func TestCondition(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 	condition := false
 	var conditionErr error = nil
-	hookTime := time.Time{}
+	//hookTime := time.Time{}
 
-	_ = runner.AddCondition("testCondition", func(ctx context.Context) (bool, error) {
-		hookTime = time.Now()
+	_ = runner.AddCondition(ctx, func(ctx context.Context) (bool, error) {
+		//hookTime = time.Now()
 		return condition, conditionErr
 	})
-	assert.ErrorIs(runner.Apply(ctx), ErrStateNotRun)
-	res := runner.Result(ctx)
-	assert.False(res.Changed())
-	assert.ErrorIs(res.Err(), ErrStateNotRun)
-	assert.NotZero(res.Completed())
+	changed, err := runner.Apply(ctx)
+	assert.Nil(err)
+	assert.False(changed)
 
 	condition = true
 	state.retCheckChanges = true
 	state.retRunChanges = true
-	assert.Nil(runner.Apply(ctx))
-	res = runner.Result(ctx)
-	assert.Nil(res.Err())
-	assert.True(res.Changed())
-	assert.True(hookTime.Before(res.Completed()))
+	changed, err = runner.Apply(ctx)
+	assert.Nil(err)
+	assert.True(changed)
 
 	cancel()
 	goleak.VerifyNone(t)
