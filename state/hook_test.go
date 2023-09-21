@@ -248,3 +248,33 @@ func TestPostRunRunFaild(t *testing.T) {
 	cancel()
 	goleak.VerifyNone(t)
 }
+
+func TestCondition(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel, state, runner := newTestRunner()
+	condition := false
+	var conditionErr error = nil
+	hookTime := time.Time{}
+
+	_ = runner.AddCondition("testCondition", func(ctx context.Context) (bool, error) {
+		hookTime = time.Now()
+		return condition, conditionErr
+	})
+	assert.ErrorIs(runner.Apply(ctx), ErrStateNotRun)
+	res := runner.Result(ctx)
+	assert.False(res.Changed())
+	assert.ErrorIs(res.Err(), ErrStateNotRun)
+	assert.NotZero(res.Completed())
+
+	condition = true
+	state.retCheckChanges = true
+	state.retRunChanges = true
+	assert.Nil(runner.Apply(ctx))
+	res = runner.Result(ctx)
+	assert.Nil(res.Err())
+	assert.True(res.Changed())
+	assert.True(hookTime.Before(res.Completed()))
+
+	cancel()
+	goleak.VerifyNone(t)
+}
