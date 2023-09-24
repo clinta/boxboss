@@ -40,7 +40,7 @@ var ErrPreCheckHook = errors.New("pre-check hook failed")
 // remaining PreCheckHooks. The first error will be returned.
 //
 // AddPreCheckHook returns a function that can be used to remove the hook.
-func (s *StateRunner) AddPreCheckHook(ctx context.Context, f func(context.Context) error) error {
+func (s *StateManager) AddPreCheckHook(ctx context.Context, f func(context.Context) error) error {
 	unlock, err := s.priorityLock(ctx)
 	defer unlock()
 	if err != nil {
@@ -77,7 +77,7 @@ var ErrCondition = errors.New("condition hook failed")
 // not be applied. But Apply will not return an error.
 //
 // AddCondition returns a function that can be used to remove the hook.
-func (s *StateRunner) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error)) error {
+func (s *StateManager) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error)) error {
 	cf := func(ctx context.Context) error {
 		v, err := f(ctx)
 		if err == nil && !v {
@@ -102,7 +102,7 @@ var ErrPostCheckHook = errors.New("post-check hook failed")
 // remaining PostCheckHooks. The first error will be returned.
 //
 // AddPostCheckHook returns a function that can be used to remove the hook.
-func (s *StateRunner) AddPostCheckHook(ctx context.Context, f func(ctx context.Context, changeNeeded bool) error) error {
+func (s *StateManager) AddPostCheckHook(ctx context.Context, f func(ctx context.Context, changeNeeded bool) error) error {
 	unlock, err := s.priorityLock(ctx)
 	defer unlock()
 	if err != nil {
@@ -122,7 +122,7 @@ func (s *StateRunner) AddPostCheckHook(ctx context.Context, f func(ctx context.C
 }
 
 // AddChangesRequiredHook adds a function that is run after the check step, only if changes are required.
-func (s *StateRunner) AddChangesRequiredHook(ctx context.Context, f func(context.Context) error) error {
+func (s *StateManager) AddChangesRequiredHook(ctx context.Context, f func(context.Context) error) error {
 	return s.AddPostCheckHook(ctx, func(ctx context.Context, changeNeeded bool) error {
 		if changeNeeded {
 			return f(ctx)
@@ -137,7 +137,7 @@ func (s *StateRunner) AddChangesRequiredHook(ctx context.Context, f func(context
 // PostRunHooks do not block returning the StateContext result. This means that a subsequent state run could run the PostRunHook before the previous one finished.
 //
 // AddPostRunHook returns a function that can be used to remove the hook.
-func (s *StateRunner) AddPostRunHook(ctx context.Context, f func(ctx context.Context, changed bool, err error)) error {
+func (s *StateManager) AddPostRunHook(ctx context.Context, f func(ctx context.Context, changed bool, err error)) error {
 	unlock, err := s.priorityLock(ctx)
 	defer unlock()
 	if err != nil {
@@ -154,7 +154,7 @@ func (s *StateRunner) AddPostRunHook(ctx context.Context, f func(ctx context.Con
 }
 
 // AddPostSuccessHook adds a PostRunHook that is run after a successful state run.
-func (s *StateRunner) AddPostSuccessHook(ctx context.Context, f func(ctx context.Context, changes bool)) error {
+func (s *StateManager) AddPostSuccessHook(ctx context.Context, f func(ctx context.Context, changes bool)) error {
 	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err == nil {
 			f(ctx, changes)
@@ -163,7 +163,7 @@ func (s *StateRunner) AddPostSuccessHook(ctx context.Context, f func(ctx context
 }
 
 // AddPostFailureHook adds a PostRunHook that is run after a failed state run.
-func (s *StateRunner) AddPostFailureHook(ctx context.Context, f func(ctx context.Context, err error)) error {
+func (s *StateManager) AddPostFailureHook(ctx context.Context, f func(ctx context.Context, err error)) error {
 	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
 			f(ctx, err)

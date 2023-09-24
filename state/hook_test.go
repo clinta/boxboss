@@ -20,7 +20,7 @@ func TestPreCheckFail(t *testing.T) {
 	_ = runner.AddPreCheckHook(ctx, func(ctx context.Context) error {
 		return hookErr
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.False(changed)
 	assert.ErrorIs(err, hookErr)
 	assert.ErrorIs(err, ErrPreCheckHook)
@@ -39,7 +39,7 @@ func TestPreCheckSucceed(t *testing.T) {
 		hookTime = time.Now()
 		return nil
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Nil(err)
 	assert.False(changed)
 	assert.Nil(err)
@@ -59,7 +59,7 @@ func TestPreCheckRemove(t *testing.T) {
 		hookTime = time.Now()
 		return nil
 	}))
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.False(changed)
 	assert.Nil(err)
 	assert.True(hookTime.Before(state.checks[0]))
@@ -68,7 +68,7 @@ func TestPreCheckRemove(t *testing.T) {
 
 	rmh()
 
-	_, err = runner.Apply(ctx)
+	_, err = runner.Manage(ctx)
 	assert.Nil(err)
 	assert.Equal(hookTime, bft)
 
@@ -86,7 +86,7 @@ func TestPostCheckFail(t *testing.T) {
 	_ = runner.AddPostCheckHook(ctx, func(ctx context.Context, _ bool) error {
 		return testErr
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.ErrorIs(err, testErr)
 	assert.ErrorIs(err, ErrPostCheckHook)
 	assert.False(changed)
@@ -105,7 +105,7 @@ func TestPostCheckSucceed(t *testing.T) {
 		hookTime = time.Now()
 		return nil
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.False(changed)
 	assert.Nil(err)
 	assert.True(hookTime.After(state.checks[0]))
@@ -124,7 +124,7 @@ func TestPostCheckRemove(t *testing.T) {
 		beforeHookTime = time.Now()
 		return nil
 	}))
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.False(changed)
 	assert.Nil(err)
 	assert.True(beforeHookTime.After(state.checks[0]))
@@ -133,7 +133,7 @@ func TestPostCheckRemove(t *testing.T) {
 
 	rmh()
 
-	_, err = runner.Apply(ctx)
+	_, err = runner.Manage(ctx)
 	assert.Nil(err)
 	assert.Equal(beforeHookTime, bft)
 
@@ -150,7 +150,7 @@ func TestPostCheckCheckFaild(t *testing.T) {
 		assert.FailNow("this should not have run")
 		return nil
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.ErrorIs(err, state.retCheckErr)
 	assert.ErrorIs(err, ErrCheckFailed)
 	assert.False(changed)
@@ -170,7 +170,7 @@ func TestPostRunSucceed(t *testing.T) {
 		postRunHookTime = time.Now()
 		close(hookDone)
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Nil(err)
 	assert.False(changed)
 	<-hookDone
@@ -193,7 +193,7 @@ func TestPostRunRemove(t *testing.T) {
 		hookTime = time.Now()
 		close(hookDone)
 	}))
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.True(changed)
 	assert.Nil(err)
 	<-hookDone
@@ -203,7 +203,7 @@ func TestPostRunRemove(t *testing.T) {
 
 	rmh()
 
-	_, err = runner.Apply(ctx)
+	_, err = runner.Manage(ctx)
 	assert.Nil(err)
 	assert.Equal(hookTime, bft)
 
@@ -222,7 +222,7 @@ func TestPostRunRunFaild(t *testing.T) {
 		assert.ErrorIs(err, state.retRunErr)
 		close(hookDone)
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.False(changed)
 	assert.ErrorIs(err, state.retRunErr)
 	assert.ErrorIs(err, ErrRunFailed)
@@ -243,14 +243,14 @@ func TestCondition(t *testing.T) {
 		//hookTime = time.Now()
 		return condition, conditionErr
 	})
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Nil(err)
 	assert.False(changed)
 
 	condition = true
 	state.retCheckChanges = true
 	state.retRunChanges = true
-	changed, err = runner.Apply(ctx)
+	changed, err = runner.Manage(ctx)
 	assert.Nil(err)
 	assert.True(changed)
 

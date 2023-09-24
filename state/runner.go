@@ -21,10 +21,10 @@ func init() {
 var ErrCheckFailed = errors.New("state check failed")
 var ErrRunFailed = errors.New("state run failed")
 
-// StateRunner launches a goroutine to accept addition and removal of hooks, and applies the state whenever Apply is called.
-// A StateRunner is safe for concurrent use by multiple goroutines.
-type StateRunner struct {
-	state          State
+// StateManager launches a goroutine to accept addition and removal of hooks, and applies the state whenever Manage is called.
+// A StateManager is safe for concurrent use by multiple goroutines.
+type StateManager struct {
+	state          StateApplier
 	lockCh         chan struct{}
 	priorityLockWg sync.WaitGroup
 	log            zerolog.Logger
@@ -33,15 +33,10 @@ type StateRunner struct {
 	postRunHooks   map[*postRunHook]struct{}
 }
 
-// Apply will apply the state.
+// Manage will apply the state.
 //
-// If multiple request to apply come in while the state is running,
-// they will all block until the net run completes, but the next run will
-// only run once. Errors from that Apply will be returned to all callers.
-//
-// If multiple Applys trigger a state run, the state run will only be stopped prematurely
-// if all Apply contexts are canceled.
-func (s *StateRunner) Apply(ctx context.Context) (changed bool, err error) {
+// Multiple request to Manage will be queued.
+func (s *StateManager) Manage(ctx context.Context) (changed bool, err error) {
 	if err := s.Wait(ctx); err != nil {
 		return false, err
 	}
@@ -58,7 +53,7 @@ var ErrStateNotRun = errors.New("state has not yet run")
 
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
-func (s *StateRunner) runTrigger(ctx context.Context) (bool, error) {
+func (s *StateManager) runTrigger(ctx context.Context) (bool, error) {
 	changed, err := s.runState(ctx)
 	{
 		for h := range s.postRunHooks {
@@ -72,7 +67,7 @@ func (s *StateRunner) runTrigger(ctx context.Context) (bool, error) {
 	return changed, err
 }
 
-func (s *StateRunner) runState(ctx context.Context) (bool, error) {
+func (s *StateManager) runState(ctx context.Context) (bool, error) {
 	log := s.log
 
 	{
@@ -134,7 +129,7 @@ func (s *StateRunner) runState(ctx context.Context) (bool, error) {
 	}
 
 	log.Debug().Msg("running")
-	changed, err := s.state.Run(ctx)
+	changed, err := s.state.Apply(ctx)
 	err = wrapErr(ErrRunFailed, err)
 
 	if !changed {
@@ -149,7 +144,7 @@ func (s *StateRunner) runState(ctx context.Context) (bool, error) {
 	return changed, err
 }
 
-func (s *StateRunner) lock(ctx context.Context) (unlock func(), err error) {
+func (s *StateManager) lock(ctx context.Context) (unlock func(), err error) {
 	s.priorityLockWg.Wait()
 	select {
 	case s.lockCh <- struct{}{}:
@@ -161,7 +156,7 @@ func (s *StateRunner) lock(ctx context.Context) (unlock func(), err error) {
 	}
 }
 
-func (s *StateRunner) priorityLock(ctx context.Context) (unlock func(), err error) {
+func (s *StateManager) priorityLock(ctx context.Context) (unlock func(), err error) {
 	s.priorityLockWg.Add(1)
 	defer s.priorityLockWg.Done()
 	select {
@@ -175,7 +170,7 @@ func (s *StateRunner) priorityLock(ctx context.Context) (unlock func(), err erro
 }
 
 // Wait will block until any hook addition or removals, or state applications are complete
-func (s *StateRunner) Wait(ctx context.Context) error {
+func (s *StateManager) Wait(ctx context.Context) error {
 	var removing bool
 	var err error
 	for removing, err = s.checkRemovedHooks(ctx); removing && err == nil; removing, err = s.checkRemovedHooks(ctx) {
@@ -184,7 +179,7 @@ func (s *StateRunner) Wait(ctx context.Context) error {
 	return err
 }
 
-func (s *StateRunner) checkRemovedHooks(ctx context.Context) (bool, error) {
+func (s *StateManager) checkRemovedHooks(ctx context.Context) (bool, error) {
 	unlock, err := s.lock(ctx)
 	defer unlock()
 	if err != nil {
@@ -214,13 +209,13 @@ func (s *StateRunner) checkRemovedHooks(ctx context.Context) (bool, error) {
 	return false, err
 }
 
-// NewStateRunner creates the state runner that will run, listening for triggers from Apply until ctx is canceled.
+// NewStateManager creates the state runner that will run, listening for triggers from Apply until ctx is canceled.
 //
 // It will run until ctx is canceled. Attempting to use the StateRunner after context is canceled will likely
 // cause deadlocks.
-func NewStateRunner(state State) *StateRunner {
+func NewStateManager(state StateApplier) *StateManager {
 	log := log.With().Str("stateRunner", state.Name()).Logger()
-	s := &StateRunner{
+	s := &StateManager{
 		state:          state,
 		lockCh:         make(chan struct{}, 1),
 		priorityLockWg: sync.WaitGroup{},

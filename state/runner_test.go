@@ -30,7 +30,7 @@ func newCatchLog(level zerolog.Level, msg string) *catchLog {
 }
 
 type testState struct {
-	*BasicState
+	*State
 	checks          []time.Time
 	runs            []time.Time
 	retCheckChanges bool
@@ -39,10 +39,10 @@ type testState struct {
 	retRunErr       error
 }
 
-func newTestRunner() (context.Context, func(), *testState, *StateRunner) {
+func newTestRunner() (context.Context, func(), *testState, *StateManager) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &testState{}
-	t.BasicState = NewBasicState("testState",
+	t.State = NewState("testState",
 		func(ctx context.Context) (bool, error) {
 			t.checks = append(t.checks, time.Now())
 			return t.retCheckChanges, t.retCheckErr
@@ -52,7 +52,7 @@ func newTestRunner() (context.Context, func(), *testState, *StateRunner) {
 			return t.retRunChanges, t.retRunErr
 		},
 	)
-	return ctx, cancel, t, NewStateRunner(t)
+	return ctx, cancel, t, NewStateManager(t)
 }
 
 func TestCheckFalse(t *testing.T) {
@@ -60,7 +60,7 @@ func TestCheckFalse(t *testing.T) {
 	ctx, cancel, state, runner := newTestRunner()
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Nil(err)
 	assert.Equal(len(state.checks), 1, "check should have run after apply")
 	assert.Zero(state.runs, "should not have run")
@@ -76,7 +76,7 @@ func TestCheckTrueRunFalse(t *testing.T) {
 	state.retCheckChanges = true
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
 	assert.Equal(h.count, 1, "did not get a warn log for check indicating changes but no changes made")
@@ -94,7 +94,7 @@ func TestCheckTrueRunTrue(t *testing.T) {
 	state.retRunChanges = true
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
 	assert.True(changed)
@@ -111,14 +111,14 @@ func TestCheckTrueRunTrueTwice(t *testing.T) {
 	state.retRunChanges = true
 
 	assert.Zero(state.checks, "should not check before apply was called")
-	changed, err := runner.Apply(ctx)
+	changed, err := runner.Manage(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
 	assert.True(changed)
 	assert.Nil(err)
 	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
 
-	changed, err = runner.Apply(ctx)
+	changed, err = runner.Manage(ctx)
 	assert.Equal(len(state.checks), 2)
 	assert.Equal(len(state.runs), 2)
 	assert.True(changed)
@@ -148,7 +148,7 @@ func TestCancelingTrigger(t *testing.T) {
 	triggerCtx, triggerCancel := context.WithCancel(ctx)
 	applyErr := make(chan error)
 	go func() {
-		_, err := runner.Apply(triggerCtx)
+		_, err := runner.Manage(triggerCtx)
 		applyErr <- err
 	}()
 	<-startCheck
@@ -178,13 +178,13 @@ func TestCancelingOneOfTwoTriggers(t *testing.T) {
 	//log.Debug().Msg("wat")
 	applyErr := make(chan error)
 	go func() {
-		_, err := runner.Apply(triggerCtx)
+		_, err := runner.Manage(triggerCtx)
 		applyErr <- err
 	}()
 	triggerCtx2 := ctx
 	applyErr2 := make(chan error)
 	go func() {
-		_, err := runner.Apply(triggerCtx2)
+		_, err := runner.Manage(triggerCtx2)
 		applyErr2 <- err
 	}()
 	<-startCheck
@@ -214,14 +214,14 @@ func TestCancelingOneTriggersWhileAnotherIsRunning(t *testing.T) {
 	triggerCtx := ctx
 	applyErr := make(chan error)
 	go func() {
-		_, err := runner.Apply(triggerCtx)
+		_, err := runner.Manage(triggerCtx)
 		applyErr <- err
 	}()
 	triggerCtx2, triggerCancel2 := context.WithCancel(ctx)
 	applyErr2 := make(chan error)
 	<-startCheck
 	go func() {
-		_, err := runner.Apply(triggerCtx2)
+		_, err := runner.Manage(triggerCtx2)
 		applyErr2 <- err
 	}()
 	triggerCancel2()
