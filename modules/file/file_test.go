@@ -2,6 +2,7 @@ package file
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"io"
 	"testing"
@@ -23,6 +24,7 @@ func (s *slowReader) Read(p []byte) (n int, err error) {
 
 func TestCmpReaders(t *testing.T) {
 	assert := assert.New(t)
+	ctx := context.Background()
 
 	b := make([]byte, chunkSize*4+5)
 	_, err := rand.Read(b)
@@ -30,19 +32,19 @@ func TestCmpReaders(t *testing.T) {
 
 	r1 := bytes.NewReader(b)
 	r2 := bytes.NewReader(bytes.Clone(b))
-	c, err := cmpReaders(r1, r2)
+	c, err := readersEqual(ctx, r1, r2)
 	assert.True(c)
 	assert.Nil(err)
 
 	r1 = bytes.NewReader(append(b, 255))
 	r2 = bytes.NewReader(b)
-	c, err = cmpReaders(r1, r2)
+	c, err = readersEqual(ctx, r1, r2)
 	assert.False(c)
 	assert.Nil(err)
 
 	r1 = bytes.NewReader(b)
 	r2 = bytes.NewReader(append(b, 255))
-	c, err = cmpReaders(r1, r2)
+	c, err = readersEqual(ctx, r1, r2)
 	assert.False(c)
 	assert.Nil(err)
 
@@ -50,13 +52,14 @@ func TestCmpReaders(t *testing.T) {
 	b2[chunkSize+5] += 1
 	r1 = bytes.NewReader(b)
 	r2 = bytes.NewReader(b2)
-	c, err = cmpReaders(r1, r2)
+	c, err = readersEqual(ctx, r1, r2)
 	assert.False(c)
 	assert.Nil(err)
 }
 
 func TestCmpReadersSlow(t *testing.T) {
 	assert := assert.New(t)
+	ctx := context.Background()
 
 	b := make([]byte, chunkSize*4+5)
 	_, err := rand.Read(b)
@@ -65,7 +68,7 @@ func TestCmpReadersSlow(t *testing.T) {
 	{
 		r1 := &slowReader{bytes.NewReader(b)}
 		r2 := bytes.NewReader(bytes.Clone(b))
-		c, err := cmpReaders(r1, r2)
+		c, err := readersEqual(ctx, r1, r2)
 		assert.True(c)
 		assert.Nil(err)
 	}
@@ -73,7 +76,7 @@ func TestCmpReadersSlow(t *testing.T) {
 	{
 		r1 := bytes.NewReader(b)
 		r2 := &slowReader{bytes.NewReader(bytes.Clone(b))}
-		c, err := cmpReaders(r1, r2)
+		c, err := readersEqual(ctx, r1, r2)
 		assert.True(c)
 		assert.Nil(err)
 	}
