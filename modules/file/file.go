@@ -26,30 +26,45 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 const chunkSize = 64000
 
 // cmpReaders compares two readers and returns true if they are the same
-func cmpReaders(r1 io.Reader, r2 io.Reader) (bool, error) {
-	b1 := make([]byte, chunkSize)
-	b2 := make([]byte, chunkSize)
+func cmpReaders(r io.Reader, t io.Reader) (bool, error) {
+	rBuf := make([]byte, chunkSize)
+	tBuf := make([]byte, chunkSize)
 
 	for {
-		r1Len, r1Err := io.ReadAtLeast(r1, b1, chunkSize)
-		r2Len, r2Err := io.ReadAtLeast(r2, b2, chunkSize)
-		if r1Len == 0 && r2Len == 0 && errors.Is(r1Err, io.EOF) && errors.Is(r2Err, io.EOF) {
-			return true, nil
+		readFromR, errR := r.Read(rBuf)
+		if errR != nil && !errors.Is(errR, io.EOF) {
+			return false, errR
 		}
-		if errors.Is(r1Err, io.EOF) || errors.Is(r2Err, io.EOF) {
-			return false, nil
+
+		readFromT := 0
+		tCmpBuf := tBuf[:readFromR]
+
+		if readFromR == 0 && errors.Is(errR, io.EOF) {
+			readFromT, errT := t.Read(tBuf[:1])
+			if readFromT == 0 && errors.Is(errT, io.EOF) {
+				return true, nil
+			} else {
+				return false, errT
+			}
 		}
-		if r1Err != nil && !errors.Is(r1Err, io.ErrUnexpectedEOF) {
-			return false, r1Err
-		}
-		if r2Err != nil && !errors.Is(r2Err, io.ErrUnexpectedEOF) {
-			return false, r2Err
-		}
-		if r1Len != r2Len {
-			return false, nil
-		}
-		for i := 0; i < r1Len; i++ {
-			if b1[i] != b2[i] {
+
+		for readFromR > readFromT {
+			nextReadFromT, errT := t.Read(tCmpBuf[readFromT:])
+			if errT != nil && !errors.Is(errT, io.EOF) {
+				return false, errT
+			}
+			prevReadFromT := readFromT
+			readFromT = prevReadFromT + nextReadFromT
+			rCmpBuf := rBuf[prevReadFromT:readFromT]
+			for i, v2 := range tCmpBuf[prevReadFromT:readFromT] {
+				if rCmpBuf[i] != v2 {
+					return false, nil
+				}
+			}
+			if errors.Is(errR, io.EOF) && errors.Is(errT, io.EOF) {
+				return true, nil
+			}
+			if errors.Is(errR, io.EOF) || errors.Is(errT, io.EOF) {
 				return false, nil
 			}
 		}
