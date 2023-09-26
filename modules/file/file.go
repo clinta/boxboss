@@ -17,6 +17,7 @@ type File struct {
 	path     string
 	contents func() io.ReadCloser
 	tmpFile  chan *tmpFileRes
+	oldFile  chan string
 	// TODO: Possible temp file
 	//   Should probably remove the temp file if ctx is canceled
 	// TODO: File mode, or should mode be a separate module?
@@ -30,14 +31,22 @@ type File struct {
 	// when apply is run, it waits for the check writing process to finish, then moves the tmp file
 }
 
+func NewFile(path string, contents func() io.ReadCloser) {
+	f := &File{
+		path:     path,
+		contents: contents,
+		tmpFile:  make(chan *tmpFileRes),
+	}
+	close(f.tmpFile)
+}
+
 func (f *File) Name() string {
 	return "file: " + f.path
 }
 
 type tmpFileRes struct {
-	name   string
-	closed <-chan struct{}
-	err    error
+	name string
+	err  error
 }
 
 func (f *File) Check(ctx context.Context) (bool, error) {
@@ -69,8 +78,9 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	tmpFileName := tmpFile.Name()
 	context.AfterFunc(ctx, func() {
-		err := os.Remove(tmpFile.Name())
+		err := os.Remove(tmpFileName)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// TODO logging is a mess
 			log.Err(err).Msg("error removing temp file")
@@ -84,13 +94,20 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 
 	tmpFileWriteCtx, tmpFileWriteCancel := context.WithCancel(ctx)
 	tmpFileClosed := make(chan struct{})
+	f.tmpFile = make(chan *tmpFileRes)
 	// Continue writing the rest of the reader to the tempfile while returning the result
 	go func() {
 		_, err := io.Copy(tmpFile, contents)
 		tmpFileWriteCancel()
-		select {
-		case f.tmpFile <- &tmpFileRes{tmpFile.Name(), tmpFileClosed, err}:
-		case <-ctx.Done():
+		<-tmpFileClosed
+		r := &tmpFileRes{tmpFileName, err}
+		for {
+			select {
+			case f.tmpFile <- r:
+			case <-ctx.Done():
+				close(f.tmpFile)
+				return
+			}
 		}
 	}()
 
@@ -104,25 +121,31 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	return !eq, err
 }
 
+// TmpFile returns the path of the temporary file.
+// During the Check() step the contents of the managed file is written out to TmpFile.
+// During the Apply() step the temporary file and the destination file are atomically swapped.
+//
+// Calling TmpFile in a post-check hook will allow access to what will become the new file during the swap.
+// Calling TmpFile in an post-run hook will allow access to the previous file, for backup ect...
+func (f *File) TmpFile(ctx context.Context) (string, error) {
+	var tmpFile *tmpFileRes
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case tmpFile = <-f.tmpFile:
+	}
+	return tmpFile.name, tmpFile.err
+}
+
 func (f *File) Apply(ctx context.Context) (bool, error) {
 	// For performance reasons, we will assume changes are always true
 	// We could be more accurate by teeing through readersEqual, but this is unnecessary overhead,
 	// Check already indicated changes are required, so assume they are being made
 
-	// TODO: should the channel be in the context?
-	var tmpFile *tmpFileRes
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case tmpFile = <-f.tmpFile:
-	}
-
-	err := tmpFile.err
+	tmpFileName, err := f.TmpFile(ctx)
 	if err != nil {
-		return false, tmpFile.err
+		return false, err
 	}
-
-	tmpFileName := tmpFile.name
 
 	// TODO: Does this work? Open on a directory to get the fd?
 	tmpD, err := os.Open(filepath.Dir(tmpFileName))
@@ -136,13 +159,6 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer dstD.Close()
-
-	// be sure the tmp file is actually closed before attempting to rename
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case <-tmpFile.closed:
-	}
 
 	// This is specific to linux, do I care?
 	// Renameat2 atomically swaps the files
