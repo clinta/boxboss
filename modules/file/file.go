@@ -35,8 +35,9 @@ func (f *File) Name() string {
 }
 
 type tmpFileRes struct {
-	name string
-	err  error
+	name   string
+	closed <-chan struct{}
+	err    error
 }
 
 func (f *File) Check(ctx context.Context) (bool, error) {
@@ -82,17 +83,22 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	eq, err := readersEqual(ctx, reader, dst)
 
 	tmpFileWriteCtx, tmpFileWriteCancel := context.WithCancel(ctx)
+	tmpFileClosed := make(chan struct{})
 	// Continue writing the rest of the reader to the tempfile while returning the result
 	go func() {
 		_, err := io.Copy(tmpFile, contents)
 		tmpFileWriteCancel()
-		f.tmpFile <- &tmpFileRes{tmpFile.Name(), err}
+		select {
+		case f.tmpFile <- &tmpFileRes{tmpFile.Name(), tmpFileClosed, err}:
+		case <-ctx.Done():
+		}
 	}()
 
 	// Stop the copy early if the context is canceled
 	go func() {
 		<-tmpFileWriteCtx.Done()
 		tmpFile.Close()
+		close(tmpFileClosed)
 	}()
 
 	return !eq, err
@@ -102,6 +108,8 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 	// For performance reasons, we will assume changes are always true
 	// We could be more accurate by teeing through readersEqual, but this is unnecessary overhead,
 	// Check already indicated changes are required, so assume they are being made
+
+	// TODO: should the channel be in the context?
 	var tmpFile *tmpFileRes
 	select {
 	case <-ctx.Done():
@@ -109,8 +117,15 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 	case tmpFile = <-f.tmpFile:
 	}
 
+	err := tmpFile.err
+	if err != nil {
+		return false, tmpFile.err
+	}
+
+	tmpFileName := tmpFile.name
+
 	// TODO: Does this work? Open on a directory to get the fd?
-	tmpD, err := os.Open(filepath.Dir(tmpFile.name))
+	tmpD, err := os.Open(filepath.Dir(tmpFileName))
 	if err != nil {
 		return false, err
 	}
@@ -122,8 +137,16 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 	}
 	defer dstD.Close()
 
+	// be sure the tmp file is actually closed before attempting to rename
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-tmpFile.closed:
+	}
+
 	// This is specific to linux, do I care?
-	err = unix.Renameat2(int(tmpD.Fd()), filepath.Base(tmpFile.name), int(dstD.Fd()), filepath.Base(f.path), unix.RENAME_EXCHANGE)
+	// Renameat2 atomically swaps the files
+	err = unix.Renameat2(int(tmpD.Fd()), filepath.Base(tmpFileName), int(dstD.Fd()), filepath.Base(f.path), unix.RENAME_EXCHANGE)
 
 	// TODO: tmpFile is now the old file... we could do something to back it up or keep it here with an afterfunc,
 	// but the afterfunc wouldn't know the name of the temp file. How to do that? Maybe the tmp file name can be in the context
