@@ -78,8 +78,13 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
 	tmpFileName := tmpFile.Name()
+	tmpFileClosed := make(chan struct{})
+
 	context.AfterFunc(ctx, func() {
+		// Clean up any lingering temp file after everything is done
+		<-tmpFileClosed
 		err := os.Remove(tmpFileName)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// TODO logging is a mess
@@ -93,9 +98,10 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	eq, err := readersEqual(ctx, reader, dst)
 
 	tmpFileWriteCtx, tmpFileWriteCancel := context.WithCancel(ctx)
-	tmpFileClosed := make(chan struct{})
 	f.tmpFile = make(chan *tmpFileRes)
-	// Continue writing the rest of the reader to the tempfile while returning the result
+
+	// Continue writing the rest of the reader to the tmpfile
+	// Then return the tmpfile name on the channel for future uses
 	go func() {
 		_, err := io.Copy(tmpFile, contents)
 		tmpFileWriteCancel()
@@ -138,10 +144,6 @@ func (f *File) TmpFile(ctx context.Context) (string, error) {
 }
 
 func (f *File) Apply(ctx context.Context) (bool, error) {
-	// For performance reasons, we will assume changes are always true
-	// We could be more accurate by teeing through readersEqual, but this is unnecessary overhead,
-	// Check already indicated changes are required, so assume they are being made
-
 	tmpFileName, err := f.TmpFile(ctx)
 	if err != nil {
 		return false, err
@@ -160,8 +162,7 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 	}
 	defer dstD.Close()
 
-	// This is specific to linux, do I care?
-	// Renameat2 atomically swaps the files
+	// Renameat2 with RENAME_EXCHANGE atomically swaps the files, available since Linux 3.14
 	err = unix.Renameat2(int(tmpD.Fd()), filepath.Base(tmpFileName), int(dstD.Fd()), filepath.Base(f.path), unix.RENAME_EXCHANGE)
 
 	// TODO: tmpFile is now the old file... we could do something to back it up or keep it here with an afterfunc,
