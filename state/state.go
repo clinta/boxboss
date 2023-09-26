@@ -8,6 +8,9 @@ type StateApplier interface {
 	Name() string
 
 	// Check reports whether changes are required. If no changes are required, Apply will not be called by the StateRunner.
+	//
+	// The context provided to check will be done when after any post-run hooks are complete, so cleanup tasks required by a state
+	// can be done using an afterFunc to the context
 	Check(context.Context) (bool, error)
 
 	// Apply makes modifications to the system bringing it into compliance. Reports whether changes were made during the process.

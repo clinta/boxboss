@@ -54,15 +54,23 @@ var ErrStateNotRun = errors.New("state has not yet run")
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
 func (s *StateManager) runTrigger(ctx context.Context) (bool, error) {
-	changed, err := s.runState(ctx)
+	runCtx, runDone := context.WithCancel(ctx)
+	changed, err := s.runState(runCtx)
 	{
+		wg := sync.WaitGroup{}
 		for h := range s.postRunHooks {
+			wg.Add(1)
 			go func(f *postRunHook) {
 				//log := log.With().Str("post-run hook", f.name).Logger()
 				log.Debug().Msg("running post-run hook")
 				f.f(ctx, changed, err)
+				wg.Done()
 			}(h)
 		}
+		go func() {
+			wg.Wait()
+			runDone()
+		}()
 	}
 	return changed, err
 }
