@@ -5,12 +5,18 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
+
+	"github.com/rs/zerolog/log"
+	"golang.org/x/sys/unix"
 )
 
 type File struct {
 	path     string
-	contents func() io.Reader
+	contents func() io.ReadCloser
+	tmpFile  chan *tmpFileRes
 	// TODO: Possible temp file
 	//   Should probably remove the temp file if ctx is canceled
 	// TODO: File mode, or should mode be a separate module?
@@ -26,6 +32,11 @@ type File struct {
 
 func (f *File) Name() string {
 	return "file: " + f.path
+}
+
+type tmpFileRes struct {
+	name string
+	err  error
 }
 
 func (f *File) Check(ctx context.Context) (bool, error) {
@@ -45,11 +56,45 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 
 	// TODO: What if the file doesn't exist?
 	dst, err := os.Open(f.path)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
 	if err != nil {
 		return true, err
 	}
 	defer dst.Close()
-	eq, err := readersEqual(ctx, f.contents(), dst)
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst.Name()), filepath.Base(dst.Name()))
+	if err != nil {
+		return false, err
+	}
+	context.AfterFunc(ctx, func() {
+		err := os.Remove(tmpFile.Name())
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// TODO logging is a mess
+			log.Err(err).Msg("error removing temp file")
+		}
+	})
+
+	contents := f.contents()
+	reader := io.TeeReader(contents, tmpFile)
+
+	eq, err := readersEqual(ctx, reader, dst)
+
+	tmpFileWriteCtx, tmpFileWriteCancel := context.WithCancel(ctx)
+	// Continue writing the rest of the reader to the tempfile while returning the result
+	go func() {
+		_, err := io.Copy(tmpFile, contents)
+		tmpFileWriteCancel()
+		f.tmpFile <- &tmpFileRes{tmpFile.Name(), err}
+	}()
+
+	// Stop the copy early if the context is canceled
+	go func() {
+		<-tmpFileWriteCtx.Done()
+		tmpFile.Close()
+	}()
+
 	return !eq, err
 }
 
@@ -57,19 +102,32 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 	// For performance reasons, we will assume changes are always true
 	// We could be more accurate by teeing through readersEqual, but this is unnecessary overhead,
 	// Check already indicated changes are required, so assume they are being made
-
-	w, err := func() (int64, error) {
-		dst, err := os.Open(f.path)
-		if err != nil {
-			return 0, err
-		}
-		defer dst.Close()
-		return io.Copy(dst, f.contents())
-	}()
-	if w > 0 {
-		os.Truncate(f.path, w)
+	var tmpFile *tmpFileRes
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case tmpFile = <-f.tmpFile:
 	}
-	return true, err
+
+	// TODO: Does this work? Open on a directory to get the fd?
+	tmpD, err := os.Open(filepath.Dir(tmpFile.name))
+	if err != nil {
+		return false, err
+	}
+	defer tmpD.Close()
+
+	dstD, err := os.Open(filepath.Dir(f.path))
+	if err != nil {
+		return false, err
+	}
+	defer dstD.Close()
+
+	// This is specific to linux, do I care?
+	err = unix.Renameat2(int(tmpD.Fd()), filepath.Base(tmpFile.name), int(dstD.Fd()), filepath.Base(f.path), unix.RENAME_EXCHANGE)
+
+	// TODO: tmpFile is now the old file... we could do something to back it up or keep it here with an afterfunc,
+	// but the afterfunc wouldn't know the name of the temp file. How to do that? Maybe the tmp file name can be in the context
+	return err == nil, err
 }
 
 const chunkSize = 65_536
