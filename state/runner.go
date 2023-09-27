@@ -31,6 +31,7 @@ type StateManager struct {
 	postCheckHooks map[*postCheckHook]struct{}
 	preCheckHooks  map[*preCheckHook]struct{}
 	postRunHooks   map[*postRunHook]struct{}
+	postRunWg      sync.WaitGroup
 }
 
 // Manage will apply the state.
@@ -56,6 +57,7 @@ var checkChangesButNoRunChanges = "check indicated changes were required, but ru
 func (s *StateManager) runTrigger(ctx context.Context) (bool, error) {
 	runCtx, runDone := context.WithCancel(ctx)
 	changed, err := s.runState(runCtx)
+	s.postRunWg.Add(1)
 	{
 		wg := sync.WaitGroup{}
 		for h := range s.postRunHooks {
@@ -70,6 +72,7 @@ func (s *StateManager) runTrigger(ctx context.Context) (bool, error) {
 		go func() {
 			wg.Wait()
 			runDone()
+			s.postRunWg.Done()
 		}()
 	}
 	return changed, err
@@ -179,42 +182,78 @@ func (s *StateManager) priorityLock(ctx context.Context) (unlock func(), err err
 
 // Wait will block until any hook addition or removals, or state applications are complete
 func (s *StateManager) Wait(ctx context.Context) error {
-	var removing bool
-	var err error
-	for removing, err = s.checkRemovedHooks(ctx); removing && err == nil; removing, err = s.checkRemovedHooks(ctx) {
-		// keep checking
+	unlock, err := s.lock(ctx)
+	if err != nil {
+		unlock()
+		return err
 	}
-	return err
+	for s.checkRemovedHooks(ctx) {
+		unlock()
+		unlock, err = s.lock(ctx)
+		if err != nil {
+			unlock()
+			return err
+		}
+	}
+	unlock()
+	return nil
 }
 
-func (s *StateManager) checkRemovedHooks(ctx context.Context) (bool, error) {
+// WaitAll waits for hook additions or removals, state applications, and any currently running post-run hooks
+func (s *StateManager) WaitAll(ctx context.Context) error {
 	unlock, err := s.lock(ctx)
 	defer unlock()
 	if err != nil {
-		return false, err
+		return err
 	}
+
+	for s.checkRemovedHooks(ctx) {
+		unlock()
+		unlock, err = s.lock(ctx)
+		if err != nil {
+			unlock()
+			return err
+		}
+	}
+	defer unlock()
+
+	c := make(chan struct{})
+	go func() {
+		s.postRunWg.Wait()
+		close(c)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c:
+		return nil
+	}
+}
+
+// outer func needs to lock before calling this
+func (s *StateManager) checkRemovedHooks(ctx context.Context) bool {
 	for h := range s.preCheckHooks {
 		select {
 		case <-h.ctx.Done():
-			return true, err
+			return true
 		default:
 		}
 	}
 	for h := range s.postCheckHooks {
 		select {
 		case <-h.ctx.Done():
-			return true, err
+			return true
 		default:
 		}
 	}
 	for h := range s.postRunHooks {
 		select {
 		case <-h.ctx.Done():
-			return true, err
+			return true
 		default:
 		}
 	}
-	return false, err
+	return false
 }
 
 // NewStateManager creates the state runner that will run, listening for triggers from Apply until ctx is canceled.
@@ -231,6 +270,7 @@ func NewStateManager(state StateApplier) *StateManager {
 		postCheckHooks: map[*postCheckHook]struct{}{},
 		preCheckHooks:  map[*preCheckHook]struct{}{},
 		postRunHooks:   map[*postRunHook]struct{}{},
+		postRunWg:      sync.WaitGroup{},
 	}
 	return s
 }
