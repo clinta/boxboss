@@ -22,17 +22,7 @@ type File struct {
 	contents       func() io.ReadCloser
 	backupLocation string
 	tmpFile        chan *tmpFileRes
-	// TODO: Possible temp file
-	//   Should probably remove the temp file if ctx is canceled
-	// TODO: File mode, or should mode be a separate module?
-	//   Should copy the mode of the source to the destination
-	// TODO: create directories? Or should this also be a separate module?
-
-	// More ideas
-	// have a sub-context that runs for the duration of a state run from pre-check to the last post-apply
-	// we can hook into this context to delete temp files.
-	// check can be writing out to a file, return a false quickly, but keep making the file in a goroutine (with the ctx)
-	// when apply is run, it waits for the check writing process to finish, then moves the tmp file
+	// TODO: File mode module
 }
 
 func NewFile(path string, contents func() io.ReadCloser) File {
@@ -56,39 +46,6 @@ type tmpFileRes struct {
 }
 
 func (f *File) Check(ctx context.Context) (bool, error) {
-	// compare the buffers, while writing out to a temp file
-	// write out file to /tmp?
-	// no that seems dumb, compare the buffers
-	// if it's an http download or something, then write out to tmp
-	// but for the base case just use the buffer as intended
-
-	// Note to self: If the file changes between the check and the run, the trigger watching the file
-	// should cancel the context and start over, so this shouldn't be something that needs to be handled here
-
-	// If the source is http, the contents reader should be wrapped in a tee that outputs to a file during check
-	// then that file should be used as the source during apply
-
-	// If the source is a local file, this is not needed
-
-	// TODO: What if the file doesn't exist?
-	/*
-		dstStat, err := os.Stat(f.path)
-		if errors.Is(err, os.ErrNotExist) {
-			// TODO: Create the file
-			err = nil
-		}
-		if err != nil {
-			return true, err
-		}
-
-		var UID int
-		var GID int
-		if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
-			UID = int(stat.Uid)
-			GID = int(stat.Gid)
-		}
-	*/
-
 	dst, err := os.Open(f.path)
 	if errors.Is(err, os.ErrNotExist) {
 		dst, err = os.Create(f.path)
