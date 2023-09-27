@@ -5,19 +5,23 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
 
+const DefaultBackupLocation = "/var/lib/bossbox/file_backups"
+
 type File struct {
-	path     string
-	contents func() io.ReadCloser
-	tmpFile  chan *tmpFileRes
-	oldFile  chan string
+	path           string
+	contents       func() io.ReadCloser
+	backupLocation string
+	tmpFile        chan *tmpFileRes
 	// TODO: Possible temp file
 	//   Should probably remove the temp file if ctx is canceled
 	// TODO: File mode, or should mode be a separate module?
@@ -31,13 +35,15 @@ type File struct {
 	// when apply is run, it waits for the check writing process to finish, then moves the tmp file
 }
 
-func NewFile(path string, contents func() io.ReadCloser) {
-	f := &File{
-		path:     path,
-		contents: contents,
-		tmpFile:  make(chan *tmpFileRes),
+func NewFile(path string, contents func() io.ReadCloser) File {
+	f := File{
+		path:           path,
+		contents:       contents,
+		backupLocation: "",
+		tmpFile:        make(chan *tmpFileRes),
 	}
 	close(f.tmpFile)
+	return f
 }
 
 func (f *File) Name() string {
@@ -65,9 +71,27 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	// If the source is a local file, this is not needed
 
 	// TODO: What if the file doesn't exist?
+	/*
+		dstStat, err := os.Stat(f.path)
+		if errors.Is(err, os.ErrNotExist) {
+			// TODO: Create the file
+			err = nil
+		}
+		if err != nil {
+			return true, err
+		}
+
+		var UID int
+		var GID int
+		if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
+			UID = int(stat.Uid)
+			GID = int(stat.Gid)
+		}
+	*/
+
 	dst, err := os.Open(f.path)
-	if err != nil && errors.Is(err, fs.ErrNotExist) {
-		return true, nil
+	if errors.Is(err, os.ErrNotExist) {
+		dst, err = os.Create(f.path)
 	}
 	if err != nil {
 		return true, err
@@ -127,13 +151,13 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 	return !eq, err
 }
 
-// TmpFile returns the path of the temporary file.
-// During the Check() step the contents of the managed file is written out to TmpFile.
+// getTmpFile returns the path of the temporary file.
+// During the Check() step the contents of the managed file is written out to getTmpFile.
 // During the Apply() step the temporary file and the destination file are atomically swapped.
 //
-// Calling TmpFile in a post-check hook will allow access to what will become the new file during the swap.
-// Calling TmpFile in an post-run hook will allow access to the previous file, for backup ect...
-func (f *File) TmpFile(ctx context.Context) (string, error) {
+// Calling getTmpFile in a post-check hook will allow access to what will become the new file during the swap.
+// Calling getTmpFile in an post-run hook will allow access to the previous file, for backup ect...
+func (f *File) getTmpFile(ctx context.Context) (string, error) {
 	var tmpFile *tmpFileRes
 	select {
 	case <-ctx.Done():
@@ -144,8 +168,22 @@ func (f *File) TmpFile(ctx context.Context) (string, error) {
 }
 
 func (f *File) Apply(ctx context.Context) (bool, error) {
-	tmpFileName, err := f.TmpFile(ctx)
+	dstStat, err := os.Stat(f.path)
 	if err != nil {
+		return false, err
+	}
+
+	tmpFileName, err := f.getTmpFile(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
+		if err = os.Chown(tmpFileName, int(stat.Uid), int(stat.Gid)); err != nil {
+			return false, err
+		}
+	}
+	if err = os.Chmod(tmpFileName, dstStat.Mode().Perm()); err != nil {
 		return false, err
 	}
 
@@ -164,10 +202,59 @@ func (f *File) Apply(ctx context.Context) (bool, error) {
 
 	// Renameat2 with RENAME_EXCHANGE atomically swaps the files, available since Linux 3.14
 	err = unix.Renameat2(int(tmpD.Fd()), filepath.Base(tmpFileName), int(dstD.Fd()), filepath.Base(f.path), unix.RENAME_EXCHANGE)
+	if err != nil {
+		return false, errors.Join(ErrSwappingFiles, err)
+	}
 
-	// TODO: tmpFile is now the old file... we could do something to back it up or keep it here with an afterfunc,
-	// but the afterfunc wouldn't know the name of the temp file. How to do that? Maybe the tmp file name can be in the context
-	return err == nil, err
+	if f.backupLocation != "" {
+		if err := f.moveBackupFile(f.path, tmpFileName); err != nil {
+			return true, errors.Join(ErrBackingUpFile, err)
+		}
+	}
+
+	return true, nil
+}
+
+var ErrSwappingFiles = errors.New("failed to swap tmp and dst files")
+var ErrBackingUpFile = errors.New("failed to backup old file")
+
+func (f *File) moveBackupFile(dstFileName string, oldFileName string) error {
+	dstDir := filepath.Dir(dstFileName)
+	dstDirStat, err := os.Stat(dstDir)
+	if err != nil {
+		return err
+	}
+
+	backupDir := filepath.Join(f.backupLocation, dstDir)
+	err = os.MkdirAll(backupDir, dstDirStat.Mode().Perm())
+	if errors.Is(err, os.ErrExist) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// Set correct mode and owner for each level of the backup path
+	dstDirElems := filepath.SplitList(dstDir)
+	for i := range dstDirElems {
+		dir := filepath.Join(dstDirElems[:i]...)
+		bakDir := filepath.Join(f.backupLocation, dir)
+		stat, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		err = os.Chmod(bakDir, stat.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		if stat, ok := stat.Sys().(*syscall.Stat_t); ok {
+			if err = os.Chown(bakDir, int(stat.Uid), int(stat.Gid)); err != nil {
+				return err
+			}
+		}
+	}
+	bakFileName := filepath.Join(f.backupLocation, dstFileName) + "." + strconv.FormatInt(time.Now().Unix(), 10)
+	return os.Rename(oldFileName, bakFileName)
 }
 
 const chunkSize = 65_536
@@ -231,4 +318,20 @@ func checkCtx(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func (f *File) EnableBackups() error {
+	if f.backupLocation == "" {
+		return f.SetBackupLocation(DefaultBackupLocation)
+	}
+	return nil
+}
+
+func (f *File) SetBackupLocation(location string) error {
+	f.backupLocation = location
+	err := os.MkdirAll(f.backupLocation, 0700)
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nil
 }
