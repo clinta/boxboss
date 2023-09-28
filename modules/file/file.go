@@ -1,3 +1,4 @@
+// Package file provides file management modules
 package file
 
 import (
