@@ -17,6 +17,9 @@ type StateApplier interface {
 	//
 	// A warning will be logged if Check indicated changes were required, but Apply reports no changes were made.
 	Apply(context.Context) (bool, error)
+
+	// Manage returns a StateManager for this state
+	Manage() *StateManager
 }
 
 // State is a simple implementation of the StateApplier interface.
@@ -26,16 +29,20 @@ type State struct {
 	run   func(context.Context) (bool, error)
 }
 
-func (b *State) Name() string {
-	return b.name
+func (s *State) Name() string {
+	return s.name
 }
 
-func (b *State) Check(ctx context.Context) (bool, error) {
-	return b.check(ctx)
+func (s *State) Check(ctx context.Context) (bool, error) {
+	return s.check(ctx)
 }
 
-func (b *State) Apply(ctx context.Context) (bool, error) {
-	return b.run(ctx)
+func (s *State) Apply(ctx context.Context) (bool, error) {
+	return s.run(ctx)
+}
+
+func (s *State) Manage() *StateManager {
+	return NewStateManager(s)
 }
 
 func NewState(name string, check func(context.Context) (bool, error), run func(context.Context) (bool, error)) *State {

@@ -52,7 +52,7 @@ func newTestRunner() (context.Context, func(), *testState, *StateManager) {
 			return t.retRunChanges, t.retRunErr
 		},
 	)
-	return ctx, cancel, t, NewStateManager(t)
+	return ctx, cancel, t, t.Manage()
 }
 
 func TestCheckFalse(t *testing.T) {
