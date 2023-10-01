@@ -14,8 +14,6 @@ type hook struct {
 	ctx context.Context
 }
 
-type stateCtxKey string
-
 const hookCtxKey = "hook"
 
 type hookCtx struct {
@@ -41,6 +39,7 @@ func (s *StateManager) makeHookLog(ctx context.Context, hookType string) (contex
 	if s, ok := ctx.Value(hookName).(string); ok {
 		h.hookName = s
 	} else if pc, file, line, ok := runtime.Caller(3); ok {
+		// TODO: Test this!
 		h.hookName = zerolog.CallerMarshalFunc(pc, file, line)
 	}
 	ctx = context.WithValue(ctx, hookCtxKey, h)

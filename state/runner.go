@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"sync"
 
 	"github.com/rs/zerolog"
@@ -38,10 +39,87 @@ func (s *StateManager) MarshalZerologObject(e *zerolog.Event) {
 	e.Type("type", s.state).Str("name", s.state.Name())
 }
 
+type stateCtxKey string
+
+const triggerStackKey stateCtxKey = "trigger-stack"
+
+const defaultMaxTriggerDepth int = 10
+const maxTriggerDepthKey stateCtxKey = "max-trigger-depth"
+
+const triggerCtxKey stateCtxKey = "trigger-ctx"
+
+func getTriggerStack(ctx context.Context) []zerolog.LogObjectMarshaler {
+	if a, ok := ctx.Value(triggerStackKey).([]zerolog.LogObjectMarshaler); ok {
+		return a
+	}
+	return []zerolog.LogObjectMarshaler{}
+}
+
+// SetMaxTriggerDepth sets the maximum trigger depth allowed in this context.
+// If a hook from one Manage() calls another Manage(), this will increase the trigger depth by one.
+// Default limit is 10
+func SetMaxTriggerDepth(ctx context.Context, max int) context.Context {
+	return context.WithValue(ctx, maxTriggerDepthKey, max)
+}
+
+func maxTriggerDepth(ctx context.Context) int {
+	if v, ok := ctx.Value(maxTriggerDepthKey).(int); ok {
+		return v
+	}
+	return defaultMaxTriggerDepth
+}
+
+// WithTriggerCtx will return a context with an identifier for the trigger that is used to trigger
+// a StateManager.Manage(), useful for logging state calls
+func WithTriggerCtx(ctx context.Context, trigger zerolog.LogObjectMarshaler) context.Context {
+	return context.WithValue(ctx, triggerCtxKey, trigger)
+}
+
+func addTriggerCtx(ctx context.Context, trigger zerolog.LogObjectMarshaler) context.Context {
+	return context.WithValue(ctx, triggerStackKey, append(getTriggerStack(ctx), trigger))
+}
+
+type callerId string
+
+func (c callerId) MarshalZerologObject(e *zerolog.Event) {
+	e.Str("caller", string(c))
+}
+
+type unknownTrigger struct{}
+
+func (t unknownTrigger) MarshalZerologObject(e *zerolog.Event) {
+	e.Str("trigger", "unkown")
+}
+
+func triggerCtx(ctx context.Context) (context.Context, zerolog.LogObjectMarshaler) {
+	if v, ok := ctx.Value(triggerCtxKey).(zerolog.LogObjectMarshaler); ok {
+		return addTriggerCtx(ctx, v), v
+	}
+	hook, ok := ctx.Value(hookCtxKey).(zerolog.LogObjectMarshaler)
+	if ok && hook != nil {
+		return addTriggerCtx(ctx, hook), hook
+	}
+	if pc, file, line, ok := runtime.Caller(3); ok {
+		// TODO: Test this!
+		id := callerId(zerolog.CallerMarshalFunc(pc, file, line))
+		return addTriggerCtx(ctx, id), id
+	}
+	return addTriggerCtx(ctx, unknownTrigger{}), unknownTrigger{}
+}
+
+var ErrTriggerDepthExceeded = errors.New("trigger depth exceeded")
+
 // Manage will apply the state.
 //
 // Multiple request to Manage will be queued.
 func (s *StateManager) Manage(ctx context.Context) (changed bool, err error) {
+	ctx, trigger := triggerCtx(ctx)
+	log := s.log.With().Object("trigger", trigger).Logger()
+	if len(getTriggerStack(ctx)) > maxTriggerDepth(ctx) {
+		err := ErrTriggerDepthExceeded
+		log.Error().Err(err).Msg("")
+		return false, err
+	}
 	if err := s.Wait(ctx); err != nil {
 		return false, err
 	}
@@ -50,7 +128,7 @@ func (s *StateManager) Manage(ctx context.Context) (changed bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	return s.runTrigger(ctx)
+	return s.runTrigger(ctx, log)
 }
 
 // ErrStateNotRun indicates that the Runner has not been Applied.
@@ -58,17 +136,18 @@ var ErrStateNotRun = errors.New("state has not yet run")
 
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
-func (s *StateManager) runTrigger(ctx context.Context) (bool, error) {
+func (s *StateManager) runTrigger(ctx context.Context, log zerolog.Logger) (bool, error) {
 	runCtx, runDone := context.WithCancel(ctx)
-	changed, err := s.runState(runCtx)
+	changed, err := s.runState(runCtx, log)
 	s.postRunWg.Add(1)
 	{
+		if len(s.postRunHooks) > 0 {
+			log.Debug().Int("numHooks", len(s.postRunHooks)).Msg("running PostRunHooks")
+		}
 		wg := sync.WaitGroup{}
 		for h := range s.postRunHooks {
 			wg.Add(1)
 			go func(f *postRunHook) {
-				//log := log.With().Str("post-run hook", f.name).Logger()
-				log.Debug().Msg("running post-run hook")
 				f.f(ctx, changed, err)
 				wg.Done()
 			}(h)
@@ -82,27 +161,25 @@ func (s *StateManager) runTrigger(ctx context.Context) (bool, error) {
 	return changed, err
 }
 
-func (s *StateManager) runState(ctx context.Context) (bool, error) {
-	log := s.log
-
+func (s *StateManager) runState(ctx context.Context, log zerolog.Logger) (bool, error) {
 	{
+		if len(s.preCheckHooks) > 0 {
+			log.Debug().Int("numHooks", len(s.preCheckHooks)).Msg("running PreCheckHooks")
+		}
 		eg, egCtx := errgroup.WithContext(ctx)
 		for h := range s.preCheckHooks {
 			h := h
 			eg.Go(func() error {
-				//log := log.With().Str("pre-check hook", h.name).Logger()
-				log.Debug().Msg("running pre-check hook")
 				return h.f(egCtx)
 			})
 		}
 		err := eg.Wait()
 		if err != nil {
 			if errors.Is(err, ErrConditionNotMet) {
-				log := log.With().Err(err).Logger()
-				log.Debug().Msg("condition not met")
+				log.Debug().Err(err).Msg("condition not met")
 				return false, nil
 			}
-			log.Error().Err(err).Msg("pre-check hook failed")
+			log.Error().Err(err).Msg("PreCheckHook failed")
 			return false, err
 		}
 	}
@@ -110,32 +187,27 @@ func (s *StateManager) runState(ctx context.Context) (bool, error) {
 	log.Debug().Msg("running check")
 	changeNeeded, err := s.state.Check(ctx)
 	if err != nil {
-		log.Error().Err(err).Msg("check failed")
+		log.Error().Err(err).Msg("check error")
 		return false, errors.Join(ErrCheckFailed, err)
 	}
 
 	{
+		if len(s.postCheckHooks) > 0 {
+			log.Debug().Int("numHooks", len(s.postCheckHooks)).Msg("running PostCheckHooks")
+		}
 		eg, egCtx := errgroup.WithContext(ctx)
 		for h := range s.postCheckHooks {
 			h := h
 			eg.Go(func() error {
-				//log := log.With().Str("post-check hook", h.name).Logger()
-				log.Debug().Msg("running post-check hook")
-				err := h.f(egCtx, changeNeeded)
-				return err
+				return h.f(egCtx, changeNeeded)
 			})
 		}
 		err := eg.Wait()
 
 		if err != nil {
-			log.Error().Err(err).Msg("post-check hook failed")
+			log.Error().Err(err).Msg("PostCheckHook failed")
 			return false, err
 		}
-	}
-
-	err = wrapErr(ErrCheckFailed, err)
-	if err != nil {
-		log.Error().Err(err).Msg("check failed")
 	}
 
 	if !changeNeeded {
@@ -265,16 +337,16 @@ func (s *StateManager) checkRemovedHooks(ctx context.Context) bool {
 // It will run until ctx is canceled. Attempting to use the StateRunner after context is canceled will likely
 // cause deadlocks.
 func NewStateManager(state StateApplier) *StateManager {
-	log := log.With().Str("stateRunner", state.Name()).Logger()
 	s := &StateManager{
 		state:          state,
 		lockCh:         make(chan struct{}, 1),
 		priorityLockWg: sync.WaitGroup{},
-		log:            log,
+		log:            log.Logger,
 		postCheckHooks: map[*postCheckHook]struct{}{},
 		preCheckHooks:  map[*preCheckHook]struct{}{},
 		postRunHooks:   map[*postRunHook]struct{}{},
 		postRunWg:      sync.WaitGroup{},
 	}
+	s.log = log.With().Object("module", s).Logger()
 	return s
 }
