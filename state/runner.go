@@ -34,6 +34,10 @@ type StateManager struct {
 	postRunWg      sync.WaitGroup
 }
 
+func (s *StateManager) MarshalZerologObject(e *zerolog.Event) {
+	e.Type("type", s.state).Str("name", s.state.Name())
+}
+
 // Manage will apply the state.
 //
 // Multiple request to Manage will be queued.
