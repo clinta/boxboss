@@ -14,7 +14,7 @@ type hook struct {
 	ctx context.Context
 }
 
-const hookCtxKey = "hook"
+const hookCtxKey stateCtxKey = "hook"
 
 type hookCtx struct {
 	hookType string
@@ -43,21 +43,19 @@ func (s *StateManager) makeHookLog(ctx context.Context, hookType string) (contex
 		h.hookName = zerolog.CallerMarshalFunc(pc, file, line)
 	}
 	ctx = context.WithValue(ctx, hookCtxKey, h)
-	log := s.log.With().Object(hookCtxKey, h).Logger()
+	log := s.log.With().Object(string(hookCtxKey), h).Logger()
 	return ctx, log
 }
 
 func (s *StateManager) getHookLog(ctx context.Context) zerolog.Logger {
 	v := ctx.Value(hookCtxKey)
 	if h, ok := v.(zerolog.LogObjectMarshaler); ok {
-		return s.log.With().Object(hookCtxKey, h).Logger()
+		return s.log.With().Object(string(hookCtxKey), h).Logger()
 	}
-	return s.log.With().Any(hookCtxKey, v).Logger()
+	return s.log.With().Any(string(hookCtxKey), v).Logger()
 }
 
 const hookName stateCtxKey = "hook-name"
-
-const hookWrapped stateCtxKey = "hook-wrapped"
 
 type preCheckHook struct {
 	hook
@@ -308,7 +306,7 @@ func (s *StateManager) makeModuleHookLog(ctx context.Context, hookType string, r
 		module:   r,
 	}
 	ctx = context.WithValue(ctx, hookCtxKey, h)
-	log := s.log.With().Object(hookCtxKey, h).Logger()
+	log := s.log.With().Object(string(hookCtxKey), h).Logger()
 	return ctx, log
 }
 
@@ -357,7 +355,7 @@ func (s *StateManager) ChangesRequire(ctx context.Context, r *StateManager) erro
 func (s *StateManager) Triggers(ctx context.Context, r *StateManager) error {
 	ctx, log := r.makeModuleHookLog(ctx, "Triggers", r)
 	return s.AddPostRunHook(ctx, func(ctx context.Context, _ bool, _ error) {
-		r.logModuleApply(ctx, log)
+		_, _ = r.logModuleApply(ctx, log)
 	})
 }
 
@@ -365,7 +363,7 @@ func (s *StateManager) Triggers(ctx context.Context, r *StateManager) error {
 func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager) error {
 	ctx, log := r.makeModuleHookLog(ctx, "SuccessTriggers", r)
 	return s.AddPostSuccessHook(ctx, func(ctx context.Context, _ bool) {
-		r.logModuleApply(ctx, log)
+		_, _ = r.logModuleApply(ctx, log)
 	})
 }
 
@@ -373,7 +371,7 @@ func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager) err
 func (s *StateManager) ChangesTriggers(ctx context.Context, r *StateManager) error {
 	ctx, log := r.makeModuleHookLog(ctx, "ChangesTrigger", r)
 	return s.AddPostChangesHook(ctx, func(ctx context.Context) {
-		r.logModuleApply(ctx, log)
+		_, _ = r.logModuleApply(ctx, log)
 	})
 }
 
@@ -381,7 +379,7 @@ func (s *StateManager) ChangesTriggers(ctx context.Context, r *StateManager) err
 func (s *StateManager) ErrorTriggers(ctx context.Context, r *StateManager) error {
 	ctx, log := r.makeModuleHookLog(ctx, "FailureTrigger", r)
 	return s.AddPostErrorHook(ctx, func(ctx context.Context, _ error) {
-		r.logModuleApply(ctx, log)
+		_, _ = r.logModuleApply(ctx, log)
 	})
 }
 
