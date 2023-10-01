@@ -3,23 +3,79 @@ package state
 import (
 	"context"
 	"errors"
+	"runtime"
+
+	"github.com/rs/zerolog"
 )
 
 // TODO: Use contexts for names, add loggers
 
-type preCheckHook struct {
+type hook struct {
 	ctx context.Context
-	f   func(ctx context.Context) error
+}
+
+type stateCtxKey string
+
+const hookName stateCtxKey = "hook-name"
+
+const hookWrapped stateCtxKey = "hook-wrapped"
+
+func (s *StateManager) hookLog(ctx context.Context, hTyp string) (context.Context, zerolog.Logger) {
+	if w, ok := ctx.Value(hookWrapped).(bool); ok && w {
+		return ctx, zerolog.Nop()
+	}
+
+	getHookName := func() string {
+		if s, ok := ctx.Value(hookName).(string); ok {
+			return s
+		}
+		if pc, file, line, ok := runtime.Caller(3); ok {
+			return zerolog.CallerMarshalFunc(pc, file, line)
+		}
+		return "<unknown>"
+	}
+
+	log := s.log.With().Str("hook-type", hTyp).Str("hook", getHookName()).Logger()
+	return context.WithValue(ctx, hookWrapped, true), log
+}
+
+func (s *StateManager) hookedModuleLog(ctx context.Context, r *StateManager, hTyp string) (context.Context, zerolog.Logger) {
+	if w, ok := ctx.Value(hookWrapped).(bool); ok && w {
+		return ctx, zerolog.Nop()
+	}
+	ctx = context.WithValue(ctx, hookWrapped, true)
+	log := s.log.With().Str("hook-type", hTyp).Type("hooked-module-type", r).Str("hooked-module-name", r.state.Name()).Logger()
+	return ctx, log
+}
+
+func WithHookName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, hookName, name)
+}
+
+func getHookName(ctx context.Context) string {
+	if s, ok := ctx.Value(hookName).(string); ok {
+		return s
+	}
+	return "<unnamed>"
+}
+
+func (h *hook) name() string {
+	return getHookName(h.ctx)
+}
+
+type preCheckHook struct {
+	hook
+	f func(ctx context.Context) error
 }
 
 type postCheckHook struct {
-	ctx context.Context
-	f   func(ctx context.Context, changeNeeded bool) error
+	hook
+	f func(ctx context.Context, changeNeeded bool) error
 }
 
 type postRunHook struct {
-	ctx context.Context
-	f   func(ctx context.Context, changed bool, err error)
+	hook
+	f func(ctx context.Context, changed bool, err error)
 }
 
 func wrapErr(parent error, child error) error {
@@ -49,7 +105,7 @@ func (s *StateManager) AddPreCheckHook(ctx context.Context, f func(context.Conte
 	hf := func(ctx context.Context) error {
 		return wrapErr(ErrPreCheckHook, f(ctx))
 	}
-	h := &preCheckHook{ctx, hf}
+	h := &preCheckHook{hook{ctx}, hf}
 	s.preCheckHooks[h] = struct{}{}
 	context.AfterFunc(ctx, func() {
 		unlock, _ = s.priorityLock(context.Background())
@@ -108,7 +164,7 @@ func (s *StateManager) AddPostCheckHook(ctx context.Context, f func(ctx context.
 	if err != nil {
 		return err
 	}
-	h := &postCheckHook{ctx,
+	h := &postCheckHook{hook{ctx},
 		func(ctx context.Context, changeNeeded bool) error {
 			return wrapErr(ErrPostCheckHook, f(ctx, changeNeeded))
 		}}
@@ -143,7 +199,7 @@ func (s *StateManager) AddPostRunHook(ctx context.Context, f func(ctx context.Co
 	if err != nil {
 		return err
 	}
-	h := &postRunHook{ctx, f}
+	h := &postRunHook{hook{ctx}, f}
 	s.postRunHooks[h] = struct{}{}
 	context.AfterFunc(ctx, func() {
 		unlock, _ = s.priorityLock(context.Background())
@@ -171,145 +227,104 @@ func (s *StateManager) AddPostFailureHook(ctx context.Context, f func(ctx contex
 	})
 }
 
-/*
-// ErrDependancyFailed is returned by the state when a dependency failed.
-//
-// This will be wrapped in an ErrPreCheckHook.
-var ErrDependancyFailed = errors.New("dependency failed")
-
-func (s *StateRunner) relate(f func(s *StateRunner, t *StateRunner) func(), ts ...*StateRunner) func() {
-	wg := sync.WaitGroup{}
-	rCh := make(chan func())
-	for _, t := range ts {
-		if s == t {
-			continue
+// AddPostChangesHook adds a PostRunHook that is run after a successful state run that made changes.
+func (s *StateManager) AddPostChangesHook(ctx context.Context, f func(ctx context.Context)) error {
+	return s.AddPostSuccessHook(ctx, func(ctx context.Context, changes bool) {
+		if changes {
+			f(ctx)
 		}
-		wg.Add(1)
-		go func(t *StateRunner) {
-			rCh <- f(s, t)
-			wg.Done()
-		}(t)
-	}
-	go func() {
-		wg.Wait()
-		close(rCh)
-	}()
-	removes := []func(){}
-	for r := range rCh {
-		removes = append(removes, r)
-	}
-
-	return func() {
-		wg := sync.WaitGroup{}
-		for _, r := range removes {
-			wg.Add(1)
-			go func(r func()) {
-				r()
-				wg.Done()
-			}(r)
-		}
-		wg.Wait()
-	}
-}
-
-func (s *StateRunner) dependOn(d *StateRunner) func() {
-	f := wrapErrf(ErrDependancyFailed, func(ctx context.Context) error { _, err := d.ApplyOnce(ctx); return err })
-	remove := s.AddPreCheckHook("dependancy: "+d.state.Name(), f)
-	go func() {
-		<-d.ctx.Done()
-		remove()
-	}()
-	return remove
-}
-
-// DependOn makes s dependent on d. If s.Apply is called, this will make sure that d.Apply has been called at least once.
-//
-// If d.ApplyOnce returns an error it will prevent s.Apply from running.
-func (s *StateRunner) DependOn(d ...*StateRunner) func() {
-	return s.relate((*StateRunner).dependOn, d...)
-}
-
-func LogErr(err error) {
-	log.Error().Err(err)
-}
-
-func DiscardErr(error) {
-	//noop
-}
-
-func (s *StateRunner) triggerOnSuccess(cb func(error), t *StateRunner) func() {
-	f := func(ctx context.Context) {
-		_, err := s.Apply(ctx)
-		cb(err)
-	}
-	remove := t.AddPostSuccessHook("triggering: "+s.state.Name(), f)
-	go func() {
-		<-s.ctx.Done()
-		remove()
-	}()
-	return remove
-}
-
-// TriggerOnSuccess causes this s.Apply to be run whenever the t.Apply succeeds.
-//
-// cb is a callback to handle the result of s.Apply. Use LogErr to simply log the error, or DiscardErr to do nothing.
-func (s *StateRunner) TriggerOnSuccess(cb func(error), t ...*StateRunner) func() {
-	f := func(s *StateRunner, t *StateRunner) func() {
-		return s.triggerOnSuccess(cb, t)
-	}
-	return s.relate(f, t...)
-}
-
-func (s *StateRunner) blockOn(t *StateRunner) func() {
-	remove := s.AddPreCheckHook("blockOn: "+t.state.Name(), func(ctx context.Context) error {
-		t.Result(ctx)
-		return nil
 	})
-	go func() {
-		<-t.ctx.Done()
-		remove()
-	}()
-	return remove
 }
 
-// BlockOn prevents s.Apply from running while t.Apply is running
-// TODO add ConflictsWith to add BlockOn in both directions.
-func (s *StateRunner) BlockOn(t ...*StateRunner) func() {
-	return s.relate((*StateRunner).blockOn, t...)
+func manageWrap(s *StateManager) func(context.Context) error {
+	return func(ctx context.Context) error {
+		_, err := s.Manage(ctx)
+		return err
+	}
 }
 
-func (s *StateRunner) ConflictsWith(t ...*StateRunner) func() {
-	ts := append(t, s)
-	wg := sync.WaitGroup{}
-	rCh := make(chan func())
-	for _, s := range ts {
-		wg.Add(1)
-		go func(s *StateRunner) {
-			rCh <- s.BlockOn(ts...)
-			wg.Done()
-		}(s)
-	}
+// Require sets r as a requirement that must be successful before s can be applied
+func (s *StateManager) Require(ctx context.Context, r *StateManager) error {
+	ctx = WithHookName(ctx, "requires: r.state.Name()")
+	return s.AddPreCheckHook(ctx, manageWrap(r))
+}
 
-	go func() {
-		wg.Wait()
-		close(rCh)
-	}()
+// RequireChanges sets r as a condition and only runs s if r made changes
+func (s *StateManager) RequireChanges(ctx context.Context, r *StateManager) error {
+	ctx = WithHookName(ctx, "requires-changes: r.state.Name()")
+	return s.AddCondition(ctx, r.Manage)
+}
 
-	removes := []func(){}
-	for r := range rCh {
-		removes = append(removes, r)
-	}
+// ChangesRequire requires r as a requirement that runs only if changes are indicated by s.Check
+func (s *StateManager) ChangesRequire(ctx context.Context, r *StateManager) error {
+	ctx = WithHookName(ctx, "changes-require: r.state.Name()")
+	return s.AddChangesRequiredHook(ctx, manageWrap(r))
+}
 
-	return func() {
-		wg := sync.WaitGroup{}
-		for _, r := range removes {
-			wg.Add(1)
-			go func(r func()) {
-				r()
-				wg.Done()
-			}(r)
+// Triggers triggers r anytime s is run (regardless of success or changes)
+func (s *StateManager) Triggers(ctx context.Context, r *StateManager) error {
+	ctx = WithHookName(ctx, "triggers: r.state.Name()")
+	return s.AddPostRunHook(ctx, func(ctx context.Context, _ bool, _ error) {
+		r.Manage(ctx)
+	})
+}
+
+// SuccessTriggers triggers r when s.Apply is successful
+func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager) error {
+	ctx = WithHookName(ctx, "success-triggers: r.state.Name()")
+	return s.AddPostSuccessHook(ctx, func(ctx context.Context, _ bool) {
+		r.Manage(ctx)
+	})
+}
+
+// ChangesTrigger triggers r anytime s successfully makes changes
+func (s *StateManager) ChangesTrigger(ctx context.Context, r *StateManager) error {
+	ctx, log := s.hookedModuleLog(ctx, r, "changes-trigger")
+	return s.AddPostChangesHook(ctx, func(ctx context.Context) {
+		log.Debug().Msg("running hook")
+		changes, err := r.Manage(ctx)
+		log := log.With().Bool("changes", changes).Logger()
+		if err != nil {
+			log.Err(err).Msg("")
 		}
-		wg.Wait()
-	}
+		log.Debug().Msg("hook complete")
+	})
 }
-*/
+
+// FailureTrigger triggers r anytime s fails
+func (s *StateManager) FailureTrigger(ctx context.Context, r *StateManager) error {
+	ctx, log := s.hookedModuleLog(ctx, r, "failure-trigger")
+	return s.AddPostFailureHook(ctx, func(ctx context.Context, _ error) {
+		log.Debug().Msg("running hook")
+		changes, err := r.Manage(ctx)
+		log := log.With().Bool("changes", changes).Logger()
+		if err != nil {
+			log.Err(err).Msg("")
+			return
+		}
+		log.Debug().Msg("hook complete")
+	})
+}
+
+// conflictsWith prevents s and r from running at the same time
+func (s *StateManager) conflictsWith(ctx context.Context, r *StateManager) error {
+	ctx, log := s.hookedModuleLog(ctx, r, "conflicts-with")
+	return s.AddPreCheckHook(ctx, func(ctx context.Context) error {
+		log.Debug().Msg("waiting on conflicting module")
+		err := r.Wait(ctx)
+		log.Debug().Msg("done waiting on conflicting module")
+		return err
+	})
+}
+
+// ConflictsWith prevents s and r from running at the same time
+func (s *StateManager) ConflictsWith(ctx context.Context, r *StateManager) error {
+	// Note: This should not race
+	// while s is waiting on r, s is already locked, so r cannot start again after r finishes until s finishes
+	// TODO: This could deadlock, what to do?
+	err := s.conflictsWith(ctx, r)
+	if err != nil {
+		return err
+	}
+	return r.conflictsWith(ctx, s)
+}
