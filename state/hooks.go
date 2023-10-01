@@ -235,13 +235,12 @@ func (s *StateManager) AddPostRunHook(ctx context.Context, f func(ctx context.Co
 	if err != nil {
 		return err
 	}
-	f = func(ctx context.Context, changed bool, err error) {
+	h := &postRunHook{hook{ctx}, func(ctx context.Context, changed bool, err error) {
 		runLog := runLog.With().Bool("changed", changed).AnErr("moduleErr", err).Logger()
 		runLog.Debug().Msg("running hook")
 		f(ctx, changed, err)
 		runLog.Debug().Msg("hook complete")
-	}
-	h := &postRunHook{hook{ctx}, f}
+	}}
 	s.postRunHooks[h] = struct{}{}
 	log.Debug().Msg("added hook")
 	context.AfterFunc(ctx, func() {
