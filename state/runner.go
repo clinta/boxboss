@@ -99,8 +99,7 @@ func triggerCtx(ctx context.Context) (context.Context, zerolog.LogObjectMarshale
 	if ok && hook != nil {
 		return addTriggerCtx(ctx, hook), hook
 	}
-	if pc, file, line, ok := runtime.Caller(3); ok {
-		// TODO: Test this!
+	if pc, file, line, ok := runtime.Caller(2); ok {
 		id := callerId(zerolog.CallerMarshalFunc(pc, file, line))
 		return addTriggerCtx(ctx, id), id
 	}
