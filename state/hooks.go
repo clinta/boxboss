@@ -3,9 +3,11 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
 	"runtime"
-
-	"github.com/rs/zerolog"
 )
 
 type hook struct {
@@ -19,16 +21,21 @@ type hookCtx struct {
 	hookName string
 }
 
-func (h *hookCtx) MarshalZerologObject(e *zerolog.Event) {
-	e.Str("type", h.hookType).Str("name", h.hookName)
+func (h *hookCtx) LogValuer() slog.Value {
+	return slog.GroupValue(slog.String("type", h.hookType), slog.String("name", h.hookName))
 }
+
+var nullHandler *slog.Logger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+	Level: slog.Level(math.MaxInt),
+},
+))
 
 // makeHookLog adds a new hook log object to ctx, and returns ctx and the logger
 // If ctx already has a hookCtx, ctx will be unchanged, and a Nop logger will be returned
 // This ensures the returned logger is only operable if the hook is not wrapped by a higher level hook
-func (s *StateManager) makeHookLog(ctx context.Context, hookType string) (context.Context, zerolog.Logger) {
-	if _, ok := ctx.Value(hookCtxKey).(zerolog.LogObjectMarshaler); ok {
-		return ctx, zerolog.Nop()
+func (s *StateManager) makeHookLog(ctx context.Context, hookType string) (context.Context, *slog.Logger) {
+	if _, ok := ctx.Value(hookCtxKey).(slog.LogValuer); ok {
+		return ctx, nullHandler
 	}
 	h := &hookCtx{
 		hookType: hookType,
@@ -36,20 +43,17 @@ func (s *StateManager) makeHookLog(ctx context.Context, hookType string) (contex
 	}
 	if s, ok := ctx.Value(hookName).(string); ok {
 		h.hookName = s
-	} else if pc, file, line, ok := runtime.Caller(2); ok {
-		h.hookName = zerolog.CallerMarshalFunc(pc, file, line)
+	} else if _, file, line, ok := runtime.Caller(2); ok {
+		h.hookName = file + ":" + fmt.Sprint(line)
 	}
 	ctx = context.WithValue(ctx, hookCtxKey, h)
-	log := s.log.With().Object(string(hookCtxKey), h).Logger()
+	log := s.log.With(hookCtxKey, h)
 	return ctx, log
 }
 
-func (s *StateManager) getHookLog(ctx context.Context) zerolog.Logger {
+func (s *StateManager) getHookLog(ctx context.Context) *slog.Logger {
 	v := ctx.Value(hookCtxKey)
-	if h, ok := v.(zerolog.LogObjectMarshaler); ok {
-		return s.log.With().Object(string(hookCtxKey), h).Logger()
-	}
-	return s.log.With().Any(string(hookCtxKey), v).Logger()
+	return s.log.With(hookCtxKey, v)
 }
 
 const hookName stateCtxKey = "hook-name"
@@ -76,12 +80,12 @@ func wrapErr(parent error, child error) error {
 	return errors.Join(parent, child)
 }
 
-func logAndWrapHookErr(err error, parentErr error, log zerolog.Logger) error {
+func logAndWrapHookErr(err error, parentErr error, log *slog.Logger) error {
 	if err == nil {
-		log.Debug().Msg("hook complete")
+		log.Debug("hook complete")
 		return nil
 	}
-	log.Error().Err(err).Msg("hook complete")
+	log.Error("hook complete", "err", err)
 	return errors.Join(parentErr, err)
 }
 
@@ -103,27 +107,23 @@ func (s *StateManager) AddPreCheckHook(ctx context.Context, f func(context.Conte
 		return err
 	}
 	hf := func(ctx context.Context) error {
-		runLog.Debug().Msg("running hook")
+		runLog.Debug("running hook")
 		err := f(ctx)
-		if err != nil && !errors.Is(err, ErrConditionNotMet) {
-			runLog.Error().Err(err).Msg("hook complete")
+		if err != nil {
+			runLog.Error("hook complete", "error", err)
 			return errors.Join(ErrPreCheckHook, err)
 		}
-		if errors.Is(err, ErrConditionNotMet) {
-			runLog.Debug().Err(err).Msg("hook complete")
-			return errors.Join(ErrPreCheckHook, err)
-		}
-		runLog.Debug().Msg("hook complete")
+		runLog.Debug("hook complete")
 		return nil
 	}
 	h := &preCheckHook{hook{ctx}, hf}
 	s.preCheckHooks[h] = struct{}{}
-	log.Debug().Msg("added hook")
+	log.Debug("added hook")
 	context.AfterFunc(ctx, func() {
 		unlock, _ = s.priorityLock(context.Background())
 		defer unlock()
 		delete(s.preCheckHooks, h)
-		log.Debug().Msg("removed hook")
+		log.Debug("removed hook")
 	})
 	return nil
 }
@@ -149,10 +149,10 @@ var ErrCondition = errors.New("condition hook error")
 func (s *StateManager) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error)) error {
 	ctx, log := s.makeHookLog(ctx, "Condition")
 	cf := func(ctx context.Context) error {
-		log.Debug().Msg("running hook")
+		log.Debug("running hook")
 		v, err := f(ctx)
 		if err == nil && !v {
-			log.Debug().Msg("condition not met")
+			log.Debug("condition not met")
 			return ErrConditionNotMet
 		}
 		return logAndWrapHookErr(err, ErrCondition, log)
@@ -184,18 +184,18 @@ func (s *StateManager) AddPostCheckHook(ctx context.Context, f func(ctx context.
 	}
 	h := &postCheckHook{hook{ctx},
 		func(ctx context.Context, changeNeeded bool) error {
-			runLog := runLog.With().Bool("changeNeeded", changeNeeded).Logger()
-			runLog.Debug().Msg("running hook")
+			runLog := runLog.With("changeNeeded", changeNeeded)
+			runLog.Debug("running hook")
 			err := f(ctx, changeNeeded)
 			return logAndWrapHookErr(err, ErrPostCheckHook, log)
 		}}
 	s.postCheckHooks[h] = struct{}{}
-	log.Debug().Msg("added hook")
+	log.Debug("added hook")
 	context.AfterFunc(ctx, func() {
 		unlock, _ = s.priorityLock(context.Background())
 		defer unlock()
 		delete(s.postCheckHooks, h)
-		log.Debug().Msg("removed hook")
+		log.Debug("removed hook")
 	})
 	return nil
 }
@@ -207,7 +207,7 @@ func (s *StateManager) AddChangesRequiredHook(ctx context.Context, f func(contex
 	ctx, log := s.makeHookLog(ctx, "ChangesRequired")
 	return s.AddPostCheckHook(ctx, func(ctx context.Context, changeNeeded bool) error {
 		if changeNeeded {
-			log.Debug().Msg("running hook")
+			log.Debug("running hook")
 			err := f(ctx)
 			return logAndWrapHookErr(err, ErrChangesRequiredFailed, log)
 		}
@@ -230,18 +230,21 @@ func (s *StateManager) AddPostRunHook(ctx context.Context, f func(ctx context.Co
 		return err
 	}
 	h := &postRunHook{hook{ctx}, func(ctx context.Context, changed bool, err error) {
-		runLog := runLog.With().Bool("changed", changed).AnErr("moduleErr", err).Logger()
-		runLog.Debug().Msg("running hook")
+		runLog := runLog.With("changed", changed)
+		if err != nil {
+			runLog = runLog.With("applyErr", err)
+		}
+		runLog.Debug("running hook")
 		f(ctx, changed, err)
-		runLog.Debug().Msg("hook complete")
+		runLog.Debug("hook complete")
 	}}
 	s.postRunHooks[h] = struct{}{}
-	log.Debug().Msg("added hook")
+	log.Debug("added hook")
 	context.AfterFunc(ctx, func() {
 		unlock, _ = s.priorityLock(context.Background())
 		defer unlock()
 		delete(s.postRunHooks, h)
-		log.Debug().Msg("removed hook")
+		log.Debug("removed hook")
 	})
 	return nil
 }
@@ -251,9 +254,9 @@ func (s *StateManager) AddPostSuccessHook(ctx context.Context, f func(ctx contex
 	ctx, log := s.makeHookLog(ctx, "PostSuccess")
 	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err == nil {
-			log.Debug().Msg("running hook")
+			log.Debug("running hook")
 			f(ctx, changes)
-			log.Debug().Msg("hook complete")
+			log.Debug("hook complete")
 		}
 	})
 }
@@ -263,9 +266,9 @@ func (s *StateManager) AddPostErrorHook(ctx context.Context, f func(ctx context.
 	ctx, log := s.makeHookLog(ctx, "PostFailure")
 	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
-			log.Debug().Msg("running hook")
+			log.Debug("running hook")
 			f(ctx, err)
-			log.Debug().Msg("hook complete")
+			log.Debug("hook complete")
 		}
 	})
 }
@@ -275,9 +278,9 @@ func (s *StateManager) AddPostChangesHook(ctx context.Context, f func(ctx contex
 	ctx, log := s.makeHookLog(ctx, "PostChanges")
 	return s.AddPostSuccessHook(ctx, func(ctx context.Context, changes bool) {
 		if changes {
-			log.Debug().Msg("running hook")
+			log.Debug("running hook")
 			f(ctx)
-			log.Debug().Msg("hook complete")
+			log.Debug("hook complete")
 		}
 	})
 }
@@ -287,36 +290,31 @@ type moduleHookCtx struct {
 	module   *StateManager
 }
 
-func (h *moduleHookCtx) MarshalZerologObject(e *zerolog.Event) {
-	e.Str("type", h.hookType).Object("module", h.module)
-}
-
 // makeHookLog adds a new hook log object to ctx, and returns ctx and the logger
 // If ctx already has a hookCtx, ctx will be unchanged, and a Nop logger will be returned
 // This ensures the returned logger is only operable if the hook is not wrapped by a higher level hook
-func (s *StateManager) makeModuleHookLog(ctx context.Context, hookType string, r *StateManager) (context.Context, zerolog.Logger) {
-	if _, ok := ctx.Value(hookCtxKey).(zerolog.LogObjectMarshaler); ok {
-		return ctx, zerolog.Nop()
+func (s *StateManager) makeModuleHookLog(ctx context.Context, hookType string, r *StateManager) (context.Context, *slog.Logger) {
+	if _, ok := ctx.Value(hookCtxKey).(slog.LogValuer); ok {
+		return ctx, nullHandler
 	}
 	h := &moduleHookCtx{
 		hookType: hookType,
 		module:   r,
 	}
 	ctx = context.WithValue(ctx, hookCtxKey, h)
-	log := s.log.With().Object(string(hookCtxKey), h).Logger()
+	log := s.log.With(hookCtxKey, h)
 	return ctx, log
 }
 
-func (r *StateManager) logModuleApply(ctx context.Context, log zerolog.Logger) (changes bool, err error) {
-	log.Debug().Msg("starting hook")
+func (r *StateManager) logModuleApply(ctx context.Context, log *slog.Logger) (changes bool, err error) {
+	log.Debug("starting hook")
 	changes, err = r.Manage(ctx)
-	var e *zerolog.Event
+	log = log.With("changes", changes)
 	if err != nil {
-		e = log.Error().Bool("changes", changes).Err(err)
+		log.Error("hook complete", "err", err)
 	} else {
-		e = log.Debug().Bool("changes", changes)
+		log.Debug("hook complete")
 	}
-	e.Msg("hook complete")
 	return changes, err
 }
 

@@ -4,23 +4,22 @@ package state
 import (
 	"context"
 	"errors"
-	"os"
+	"log/slog"
+	"reflect"
 	"runtime"
 	"sync"
 
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
 
-func init() {
-	// TODO this should be somewhere else
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+var log *slog.Logger = slog.Default()
+
+func SetLogger(l *slog.Logger) {
+	log = l
 }
 
 var ErrCheckFailed = errors.New("state check failed")
-var ErrRunFailed = errors.New("state run failed")
+var ErrApplyFailed = errors.New("state apply failed")
 
 // StateManager launches a goroutine to accept addition and removal of hooks, and applies the state whenever Manage is called.
 // A StateManager is safe for concurrent use by multiple goroutines.
@@ -28,15 +27,15 @@ type StateManager struct {
 	state          StateApplier
 	lockCh         chan struct{}
 	priorityLockWg sync.WaitGroup
-	log            zerolog.Logger
+	log            *slog.Logger
 	postCheckHooks map[*postCheckHook]struct{}
 	preCheckHooks  map[*preCheckHook]struct{}
 	postRunHooks   map[*postRunHook]struct{}
 	postRunWg      sync.WaitGroup
 }
 
-func (s *StateManager) MarshalZerologObject(e *zerolog.Event) {
-	e.Type("type", s.state).Str("name", s.state.Name())
+func (s *StateManager) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("type", reflect.TypeOf(s).String()), slog.String("name", s.state.Name()))
 }
 
 type stateCtxKey string
@@ -48,11 +47,11 @@ const maxTriggerDepthKey stateCtxKey = "max-trigger-depth"
 
 const triggerCtxKey stateCtxKey = "trigger-ctx"
 
-func getTriggerStack(ctx context.Context) []zerolog.LogObjectMarshaler {
-	if a, ok := ctx.Value(triggerStackKey).([]zerolog.LogObjectMarshaler); ok {
+func getTriggerStack(ctx context.Context) []slog.LogValuer {
+	if a, ok := ctx.Value(triggerStackKey).([]slog.LogValuer); ok {
 		return a
 	}
-	return []zerolog.LogObjectMarshaler{}
+	return []slog.LogValuer{}
 }
 
 // SetMaxTriggerDepth sets the maximum trigger depth allowed in this context.
@@ -71,39 +70,43 @@ func maxTriggerDepth(ctx context.Context) int {
 
 // WithTriggerCtx will return a context with an identifier for the trigger that is used to trigger
 // a StateManager.Manage(), useful for logging state calls
-func WithTriggerCtx(ctx context.Context, trigger zerolog.LogObjectMarshaler) context.Context {
+func WithTriggerCtx(ctx context.Context, trigger slog.LogValuer) context.Context {
 	return context.WithValue(ctx, triggerCtxKey, trigger)
 }
 
-func addTriggerCtx(ctx context.Context, trigger zerolog.LogObjectMarshaler) context.Context {
+func addTriggerCtx(ctx context.Context, trigger slog.LogValuer) context.Context {
 	return context.WithValue(ctx, triggerStackKey, append(getTriggerStack(ctx), trigger))
-}
-
-type callerId string
-
-func (c callerId) MarshalZerologObject(e *zerolog.Event) {
-	e.Str("caller", string(c))
 }
 
 type unknownTrigger struct{}
 
-func (t unknownTrigger) MarshalZerologObject(e *zerolog.Event) {
-	e.Str("trigger", "unkown")
+func (u *unknownTrigger) LogValue() slog.Value {
+	return slog.StringValue("unknown")
 }
 
-func triggerCtx(ctx context.Context) (context.Context, zerolog.LogObjectMarshaler) {
-	if v, ok := ctx.Value(triggerCtxKey).(zerolog.LogObjectMarshaler); ok {
+type caller struct {
+	file string
+	line int
+}
+
+func (c *caller) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("file", c.file), slog.Int("line", c.line))
+}
+
+func triggerCtx(ctx context.Context) (context.Context, slog.LogValuer) {
+	if v, ok := ctx.Value(triggerCtxKey).(slog.LogValuer); ok {
 		return addTriggerCtx(ctx, v), v
 	}
-	hook, ok := ctx.Value(hookCtxKey).(zerolog.LogObjectMarshaler)
+	hook, ok := ctx.Value(hookCtxKey).(slog.LogValuer)
 	if ok && hook != nil {
 		return addTriggerCtx(ctx, hook), hook
 	}
-	if pc, file, line, ok := runtime.Caller(2); ok {
-		id := callerId(zerolog.CallerMarshalFunc(pc, file, line))
-		return addTriggerCtx(ctx, id), id
+	if _, file, line, ok := runtime.Caller(2); ok {
+		c := &caller{file, line}
+		return addTriggerCtx(ctx, c), c
 	}
-	return addTriggerCtx(ctx, unknownTrigger{}), unknownTrigger{}
+	u := &unknownTrigger{}
+	return addTriggerCtx(ctx, u), u
 }
 
 var ErrTriggerDepthExceeded = errors.New("trigger depth exceeded")
@@ -113,10 +116,9 @@ var ErrTriggerDepthExceeded = errors.New("trigger depth exceeded")
 // Multiple request to Manage will be queued.
 func (s *StateManager) Manage(ctx context.Context) (changed bool, err error) {
 	ctx, trigger := triggerCtx(ctx)
-	log := s.log.With().Object("trigger", trigger).Logger()
+	log := s.log.With("trigger", trigger)
 	if len(getTriggerStack(ctx)) > maxTriggerDepth(ctx) {
 		err := ErrTriggerDepthExceeded
-		log.Error().Err(err).Msg("")
 		return false, err
 	}
 	if err := s.Wait(ctx); err != nil {
@@ -135,13 +137,13 @@ var ErrStateNotRun = errors.New("state has not yet run")
 
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
-func (s *StateManager) runTrigger(ctx context.Context, log zerolog.Logger) (bool, error) {
+func (s *StateManager) runTrigger(ctx context.Context, log *slog.Logger) (bool, error) {
 	runCtx, runDone := context.WithCancel(ctx)
 	changed, err := s.runState(runCtx, log)
 	s.postRunWg.Add(1)
 	{
 		if len(s.postRunHooks) > 0 {
-			log.Debug().Int("numHooks", len(s.postRunHooks)).Msg("running PostRunHooks")
+			log.DebugContext(ctx, "running PostRunHooks", "numHooks", len(s.postRunHooks))
 		}
 		wg := sync.WaitGroup{}
 		for h := range s.postRunHooks {
@@ -160,10 +162,10 @@ func (s *StateManager) runTrigger(ctx context.Context, log zerolog.Logger) (bool
 	return changed, err
 }
 
-func (s *StateManager) runState(ctx context.Context, log zerolog.Logger) (bool, error) {
+func (s *StateManager) runState(ctx context.Context, log *slog.Logger) (bool, error) {
 	{
 		if len(s.preCheckHooks) > 0 {
-			log.Debug().Int("numHooks", len(s.preCheckHooks)).Msg("running PreCheckHooks")
+			log.DebugContext(ctx, "running PreCheckHooks", "numHooks", len(s.preCheckHooks))
 		}
 		eg, egCtx := errgroup.WithContext(ctx)
 		for h := range s.preCheckHooks {
@@ -175,24 +177,22 @@ func (s *StateManager) runState(ctx context.Context, log zerolog.Logger) (bool, 
 		err := eg.Wait()
 		if err != nil {
 			if errors.Is(err, ErrConditionNotMet) {
-				log.Debug().Err(err).Msg("condition not met")
+				log.DebugContext(ctx, "condition not met")
 				return false, nil
 			}
-			log.Error().Err(err).Msg("PreCheckHook failed")
 			return false, err
 		}
 	}
 
-	log.Debug().Msg("running check")
+	log.DebugContext(ctx, "running check")
 	changeNeeded, err := s.state.Check(ctx)
 	if err != nil {
-		log.Error().Err(err).Msg("check error")
 		return false, errors.Join(ErrCheckFailed, err)
 	}
 
 	{
 		if len(s.postCheckHooks) > 0 {
-			log.Debug().Int("numHooks", len(s.postCheckHooks)).Msg("running PostCheckHooks")
+			log.DebugContext(ctx, "running PostCheckHooks", "numHooks", len(s.postCheckHooks))
 		}
 		eg, egCtx := errgroup.WithContext(ctx)
 		for h := range s.postCheckHooks {
@@ -204,27 +204,23 @@ func (s *StateManager) runState(ctx context.Context, log zerolog.Logger) (bool, 
 		err := eg.Wait()
 
 		if err != nil {
-			log.Error().Err(err).Msg("PostCheckHook failed")
 			return false, err
 		}
 	}
 
 	if !changeNeeded {
-		log.Debug().Msg("check indicates no changes required")
+		log.DebugContext(ctx, "check indicates no changes required")
 		return false, err
 	}
 
-	log.Debug().Msg("running")
+	log.DebugContext(ctx, "applying state")
 	changed, err := s.state.Apply(ctx)
-	err = wrapErr(ErrRunFailed, err)
-
-	if !changed {
-		log.Warn().Msg(checkChangesButNoRunChanges)
+	if err != nil {
+		err = errors.Join(ErrApplyFailed, err)
 	}
 
-	log = log.With().Bool("changed", changed).Logger()
-	if err != nil {
-		log.Error().Err(err).Msg("run failed")
+	if !changed && err == nil {
+		log.WarnContext(ctx, checkChangesButNoRunChanges)
 	}
 
 	return changed, err
@@ -340,12 +336,12 @@ func NewStateManager(state StateApplier) *StateManager {
 		state:          state,
 		lockCh:         make(chan struct{}, 1),
 		priorityLockWg: sync.WaitGroup{},
-		log:            log.Logger,
+		log:            log,
 		postCheckHooks: map[*postCheckHook]struct{}{},
 		preCheckHooks:  map[*preCheckHook]struct{}{},
 		postRunHooks:   map[*postRunHook]struct{}{},
 		postRunWg:      sync.WaitGroup{},
 	}
-	s.log = log.With().Object("module", s).Logger()
+	s.log = s.log.WithGroup("StateManager").With("state", s)
 	return s
 }

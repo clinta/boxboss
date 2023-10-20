@@ -3,7 +3,6 @@ module git.clinta.me/clinta/boxboss
 go 1.21.0
 
 require (
-	github.com/rs/zerolog v1.31.1-0.20231003223311-9e34cb475c21
 	github.com/stretchr/testify v1.8.4
 	go.uber.org/goleak v1.2.1
 	golang.org/x/sync v0.3.0

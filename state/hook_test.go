@@ -225,7 +225,7 @@ func TestPostRunRunFaild(t *testing.T) {
 	changed, err := runner.Manage(ctx)
 	assert.False(changed)
 	assert.ErrorIs(err, state.retRunErr)
-	assert.ErrorIs(err, ErrRunFailed)
+	assert.ErrorIs(err, ErrApplyFailed)
 	assert.Equal(len(state.checks), 1)
 	<-hookDone
 	cancel()
