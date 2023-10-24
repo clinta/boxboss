@@ -12,16 +12,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var log *slog.Logger = slog.Default()
-
-func Log() *slog.Logger {
-	return log
-}
-
-func SetLogger(l *slog.Logger) {
-	log = l
-}
-
 var ErrCheckFailed = errors.New("state check failed")
 var ErrApplyFailed = errors.New("state apply failed")
 
