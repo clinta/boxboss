@@ -14,6 +14,10 @@ import (
 
 var log *slog.Logger = slog.Default()
 
+func Log() *slog.Logger {
+	return log
+}
+
 func SetLogger(l *slog.Logger) {
 	log = l
 }

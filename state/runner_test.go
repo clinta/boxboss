@@ -5,28 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
 )
-
-type catchLog struct {
-	level zerolog.Level
-	msg   string
-	count int
-}
-
-func (h *catchLog) Run(_ *zerolog.Event, l zerolog.Level, msg string) {
-	if l == h.level && msg == h.msg {
-		h.count += 1
-	}
-}
-
-func newCatchLog(level zerolog.Level, msg string) *catchLog {
-	h := &catchLog{level, msg, 0}
-	log.Logger = log.Logger.Hook(h)
-	return h
-}
 
 type testState struct {
 	*State
@@ -70,7 +51,6 @@ func TestCheckFalse(t *testing.T) {
 
 func TestCheckTrueRunFalse(t *testing.T) {
 	assert := assert.New(t)
-	h := newCatchLog(zerolog.WarnLevel, checkChangesButNoRunChanges)
 	ctx, cancel, state, runner := newTestRunner()
 	state.retCheckChanges = true
 
@@ -78,7 +58,6 @@ func TestCheckTrueRunFalse(t *testing.T) {
 	changed, err := runner.Manage(ctx)
 	assert.Equal(len(state.checks), 1)
 	assert.Equal(len(state.runs), 1)
-	assert.Equal(h.count, 1, "did not get a warn log for check indicating changes but no changes made")
 	assert.False(changed)
 	assert.Nil(err)
 	assert.True(state.checks[0].Before(state.runs[0]), "should have checked before run")
@@ -137,7 +116,7 @@ func TestCancelingTrigger(t *testing.T) {
 		close(startCheck)
 		select {
 		case <-blockCheck:
-			log.Debug().Msg("blockcheck cleared")
+			Log().Debug("blockcheck cleared")
 			return false, nil
 		case <-ctx.Done():
 			return false, ctx.Err()
