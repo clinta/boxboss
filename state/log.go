@@ -10,7 +10,9 @@ type StateLogHandler struct {
 }
 
 func (h *StateLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	//TODO Check if logging from wrapped hook, hten return false
+	if noLog, ok := ctx.Value(logFlagDoNotLog).(bool); ok && noLog {
+		return false
+	}
 	return h.handler.Enabled(ctx, level)
 }
 
@@ -37,4 +39,25 @@ var log *slog.Logger = slog.New(stateLogHandler)
 
 func Log() *slog.Logger {
 	return log
+}
+
+type stateLogCtxFlag uint
+
+const (
+	logFlagDoNotLog stateLogCtxFlag = iota
+)
+
+func applyCtxTransforms(ctx context.Context, transforms ...func(context.Context) context.Context) context.Context {
+	for _, f := range transforms {
+		ctx = f(ctx)
+	}
+	return ctx
+}
+
+func setDoNotLog(ctx context.Context) context.Context {
+	return context.WithValue(ctx, logFlagDoNotLog, true)
+}
+
+func setDoLog(ctx context.Context) context.Context {
+	return context.WithValue(ctx, logFlagDoNotLog, false)
 }
