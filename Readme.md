@@ -1,10 +1,7 @@
-BoxBoss is a library for managing the state of machines, comparable to tools like Ansible, Puppet and Chef.
+BoxBoss is a library for managing the state of machines, comparable to tools like Ansible or Salt but solving some paintpoints with those tools.
 
-Takes inspiration from [mgmt](https://github.com/purpleidea/mgmt).
+Boxboss will be a daemon that listens for events to trigger specific configuration modules. If it's managing the state of  a file, it uses inotify to watch that file, and fix it as soon as it it changes, so it can never be out of compliance. If it's managing a service, it will listen for service events in dbus and keep that service in the correct state. This solves the scheduling problem.
 
-## What inspiration from mgmt
-1. Compiled
-2. Event driven. File management is trigged by inotify. Package states are triggered by package state changes.
+Boxboss doesn't use config files. It is a library and scaffolding to build your own binaries. This menas that states can be mocked and tested in CI/CD, and allows for repsenting complex dependencies that can't be reasonably done in a config file.
 
-## Why not just use mgmt?
-I did not want another DSL. I want to write my configurations in a language that already has wide support and tooling. I know the golden rule is to not mix logic and configuration, but it always happens anyway. Ansible configs are full of jinja, and an extended version of jinja that adds even more logic. Mgmt's DSL explicitly supports logic, and is working on lambdas for even more logic. I want to just use go. Using go directly means we have many more mature tools for testing, CI/CD ect... The downside is compiling unique binaries for different roles. But having this automated in CI/CD, and given the speed of the go compiler, this is a worth-while tradeoff.
+This is an early WIP.
