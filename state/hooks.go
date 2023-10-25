@@ -313,97 +313,98 @@ func (s *StateManager) AddPostChangesHook(ctx context.Context, f func(ctx contex
 	}, append(config, withHookCtx("PostChanges"))...)
 }
 
-type moduleHookCtx struct {
-	hookType string
-	module   *StateManager
-}
-
-// makeHookLog adds a new hook log object to ctx, and returns ctx and the logger
-// If ctx already has a hookCtx, ctx will be unchanged, and a Nop logger will be returned
-// This ensures the returned logger is only operable if the hook is not wrapped by a higher level hook
-func (s *StateManager) makeModuleHookLog(ctx context.Context, hookType string, r *StateManager) (context.Context, *slog.Logger) {
-	if _, ok := ctx.Value(hookCtxKey).(slog.LogValuer); ok {
-		return ctx, nullHandler
-	}
-	h := &moduleHookCtx{
-		hookType: hookType,
-		module:   r,
-	}
-	ctx = context.WithValue(ctx, hookCtxKey, h)
-	log := s.log.With(hookCtxKey, h)
-	return ctx, log
-}
-
 func (r *StateManager) logModuleApply(ctx context.Context, log *slog.Logger) (changes bool, err error) {
-	log.Debug("starting hook")
+	log.DebugContext(ctx, "starting hook")
 	changes, err = r.Manage(ctx)
 	log = log.With("changes", changes)
 	if err != nil {
-		log.Error("hook complete", "err", err)
+		log.ErrorContext(ctx, "hook complete", "err", err)
 	} else {
-		log.Debug("hook complete")
+		log.DebugContext(ctx, "hook complete")
 	}
 	return changes, err
 }
 
+func withHookModule(hookType string, r *StateManager) func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context {
+		if h, ok := ctx.Value(hookCtxKey).(*hookCtx); ok {
+			h.module = r
+			h.hookType = hookType
+			return ctx
+		}
+		return context.WithValue(ctx, hookCtxKey, &hookCtx{
+			hookType: hookType,
+			hookName: "",
+			module:   r,
+		})
+	}
+}
+
 // Require sets r as a requirement that must be successful before s can be applied
-func (s *StateManager) Require(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "Require", r)
+func (s *StateManager) Require(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("Require")
 	return s.AddPreCheckHook(ctx, func(ctx context.Context) error {
+		ctx = setLog(ctx)
 		_, err := r.logModuleApply(ctx, log)
 		return err
-	})
+	}, append(config, withHookModule("Require", r))...)
 }
 
 // RequireChanges sets r as a condition and only runs s if r made changes
-func (s *StateManager) RequireChanges(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "RequireChanges", r)
+func (s *StateManager) RequireChanges(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("RequireChanges")
 	return s.AddCondition(ctx, func(ctx context.Context) (bool, error) {
+		ctx = setLog(ctx)
 		changes, err := r.logModuleApply(ctx, log)
 		return changes, err
-	})
+	}, append(config, withHookModule("RequireChanges", r))...)
 }
 
 // ChangesRequire requires r as a requirement that runs only if changes are indicated by s.Check
-func (s *StateManager) ChangesRequire(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "ChangesRequire", r)
+func (s *StateManager) ChangesRequire(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("ChangesRequire")
 	return s.AddChangesRequiredHook(ctx,
 		func(ctx context.Context) error {
+			ctx = setLog(ctx)
 			_, err := r.logModuleApply(ctx, log)
 			return err
-		})
+		}, append(config, withHookModule("ChangesRequire", r))...)
 }
 
 // Triggers triggers r anytime s is run (regardless of success or changes)
-func (s *StateManager) Triggers(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "Triggers", r)
+func (s *StateManager) Triggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("Triggers")
 	return s.AddPostRunHook(ctx, func(ctx context.Context, _ bool, _ error) {
+		ctx = setLog(ctx)
 		_, _ = r.logModuleApply(ctx, log)
-	})
+	}, append(config, withHookModule("Triggers", r))...)
 }
 
 // SuccessTriggers triggers r when s.Apply is successful
-func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "SuccessTriggers", r)
+func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("SuccessTriggers")
 	return s.AddPostSuccessHook(ctx, func(ctx context.Context, _ bool) {
+		ctx = setLog(ctx)
 		_, _ = r.logModuleApply(ctx, log)
-	})
+	}, append(config, withHookModule("SuccessTriggers", r))...)
 }
 
 // ChangesTriggers triggers r anytime s successfully makes changes
-func (s *StateManager) ChangesTriggers(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "ChangesTrigger", r)
+func (s *StateManager) ChangesTriggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("ChangesTriggers")
 	return s.AddPostChangesHook(ctx, func(ctx context.Context) {
+		ctx = setLog(ctx)
 		_, _ = r.logModuleApply(ctx, log)
-	})
+	}, append(config, withHookModule("ChangesTriggers", r))...)
 }
 
 // ErrorTriggers triggers r anytime s errors
-func (s *StateManager) ErrorTriggers(ctx context.Context, r *StateManager) error {
-	ctx, log := r.makeModuleHookLog(ctx, "FailureTrigger", r)
+func (s *StateManager) ErrorTriggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+	setLog := logForHookType("ErrorTriggers")
 	return s.AddPostErrorHook(ctx, func(ctx context.Context, _ error) {
+		ctx = setLog(ctx)
 		_, _ = r.logModuleApply(ctx, log)
-	})
+	}, append(config, withHookModule("ErrorTriggers", r))...)
 }
 
 /*
