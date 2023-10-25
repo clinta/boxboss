@@ -5,37 +5,43 @@ import (
 	"log/slog"
 )
 
-type StateLogHandler struct {
+type stateLogHandler struct {
 	handler slog.Handler
 }
 
-func (h *StateLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func SetLogHandler(handler slog.Handler) {
+	logHandler.handler = handler
+}
+
+var logHandler *stateLogHandler = &stateLogHandler{handler: slog.Default().Handler()}
+
+var logKeys = [...]stateCtxKey{moduleCtxKey, triggerIdCtxKey, hookCtxKey}
+
+func (h *stateLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	if noLog, ok := ctx.Value(logFlagDoNotLog).(bool); ok && noLog {
 		return false
 	}
 	return h.handler.Enabled(ctx, level)
 }
 
-func (h *StateLogHandler) Handle(ctx context.Context, record slog.Record) error {
-	// TODO: Add fields based on context
+func (h *stateLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	for _, k := range logKeys {
+		if v, ok := ctx.Value(k).(slog.LogValuer); ok {
+			record.AddAttrs(slog.Attr{Key: string(k), Value: v.LogValue()})
+		}
+	}
 	return h.handler.Handle(ctx, record)
 }
 
-func (h *StateLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (h *stateLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return h.handler.WithAttrs(attrs)
 }
 
-func (h *StateLogHandler) WithGroup(name string) slog.Handler {
+func (h *stateLogHandler) WithGroup(name string) slog.Handler {
 	return h.handler.WithGroup(name)
 }
 
-var stateLogHandler *StateLogHandler = &StateLogHandler{handler: slog.Default().Handler()}
-
-func SetHandler(handler slog.Handler) {
-	stateLogHandler.handler = handler
-}
-
-var log *slog.Logger = slog.New(stateLogHandler)
+var log *slog.Logger = slog.New(logHandler)
 
 func Log() *slog.Logger {
 	return log

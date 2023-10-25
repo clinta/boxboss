@@ -4,6 +4,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"runtime"
@@ -21,7 +22,6 @@ type StateManager struct {
 	state          StateApplier
 	lockCh         chan struct{}
 	priorityLockWg sync.WaitGroup
-	log            *slog.Logger
 	postCheckHooks map[*postCheckHook]struct{}
 	preCheckHooks  map[*preCheckHook]struct{}
 	postRunHooks   map[*postRunHook]struct{}
@@ -29,7 +29,7 @@ type StateManager struct {
 }
 
 func (s *StateManager) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("type", reflect.TypeOf(s).String()), slog.String("name", s.state.Name()))
+	return slog.GroupValue(slog.String("type", reflect.TypeOf(s.state).String()), slog.String("name", s.state.Name()))
 }
 
 type stateCtxKey string
@@ -37,9 +37,48 @@ type stateCtxKey string
 const triggerStackKey stateCtxKey = "trigger-stack"
 
 const defaultMaxTriggerDepth int = 10
-const maxTriggerDepthKey stateCtxKey = "max-trigger-depth"
+const maxTriggerDepthCtxKey stateCtxKey = "max-trigger-depth"
 
-const triggerCtxKey stateCtxKey = "trigger-ctx"
+const triggerIdCtxKey stateCtxKey = "trigger"
+
+const moduleCtxKey stateCtxKey = "module"
+
+// WithMaxTriggerDepth sets the maximum trigger depth allowed in this context.
+// If a hook from one Manage() calls another Manage(), this will increase the trigger depth by one.
+// Default limit is 10
+func WithMaxTriggerDepth(max int) func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context {
+		return context.WithValue(ctx, maxTriggerDepthCtxKey, max)
+	}
+}
+
+func maxTriggerDepth(ctx context.Context) int {
+	if v, ok := ctx.Value(maxTriggerDepthCtxKey).(int); ok {
+		return v
+	}
+	return defaultMaxTriggerDepth
+}
+
+// WithTriggerId will return a context with an identifier for the trigger that is used to trigger
+// a StateManager.Manage(), useful for logging state calls
+func WithTriggerId(trigger slog.LogValuer) func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context {
+		return context.WithValue(ctx, triggerIdCtxKey, trigger)
+	}
+}
+
+// withTriggerId will set an ID from the caller, if one does not already exist in the context
+func withTriggerId(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(triggerIdCtxKey).(slog.LogValuer); ok {
+		return ctx
+	}
+	if _, file, line, ok := runtime.Caller(3); ok {
+		c := &caller{file, line}
+		return WithTriggerId(c)(ctx)
+	}
+	u := &unknownTrigger{}
+	return WithTriggerId(u)(ctx)
+}
 
 func getTriggerStack(ctx context.Context) []slog.LogValuer {
 	if a, ok := ctx.Value(triggerStackKey).([]slog.LogValuer); ok {
@@ -48,28 +87,28 @@ func getTriggerStack(ctx context.Context) []slog.LogValuer {
 	return []slog.LogValuer{}
 }
 
-// SetMaxTriggerDepth sets the maximum trigger depth allowed in this context.
-// If a hook from one Manage() calls another Manage(), this will increase the trigger depth by one.
-// Default limit is 10
-func SetMaxTriggerDepth(ctx context.Context, max int) context.Context {
-	return context.WithValue(ctx, maxTriggerDepthKey, max)
-}
-
-func maxTriggerDepth(ctx context.Context) int {
-	if v, ok := ctx.Value(maxTriggerDepthKey).(int); ok {
-		return v
-	}
-	return defaultMaxTriggerDepth
-}
-
-// WithTriggerCtx will return a context with an identifier for the trigger that is used to trigger
-// a StateManager.Manage(), useful for logging state calls
-func WithTriggerCtx(ctx context.Context, trigger slog.LogValuer) context.Context {
-	return context.WithValue(ctx, triggerCtxKey, trigger)
-}
-
 func addTriggerCtx(ctx context.Context, trigger slog.LogValuer) context.Context {
 	return context.WithValue(ctx, triggerStackKey, append(getTriggerStack(ctx), trigger))
+}
+
+func withTriggerStack(ctx context.Context) context.Context {
+	stack := getTriggerStack(ctx)
+	trigger, ok := ctx.Value(triggerIdCtxKey).(slog.LogValuer)
+	if !ok {
+		ctx = withTriggerId(ctx)
+		trigger = ctx.Value(triggerIdCtxKey).(slog.LogValuer)
+	}
+	if len(stack) > 0 && stack[len(stack)-1] == trigger {
+		return ctx
+	}
+	stack = append(stack, trigger)
+	return context.WithValue(ctx, triggerStackKey, stack)
+}
+
+func (s *StateManager) withModule() func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context {
+		return context.WithValue(ctx, moduleCtxKey, s)
+	}
 }
 
 type unknownTrigger struct{}
@@ -84,23 +123,7 @@ type caller struct {
 }
 
 func (c *caller) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("file", c.file), slog.Int("line", c.line))
-}
-
-func triggerCtx(ctx context.Context) (context.Context, slog.LogValuer) {
-	if v, ok := ctx.Value(triggerCtxKey).(slog.LogValuer); ok {
-		return addTriggerCtx(ctx, v), v
-	}
-	hook, ok := ctx.Value(hookCtxKey).(slog.LogValuer)
-	if ok && hook != nil {
-		return addTriggerCtx(ctx, hook), hook
-	}
-	if _, file, line, ok := runtime.Caller(2); ok {
-		c := &caller{file, line}
-		return addTriggerCtx(ctx, c), c
-	}
-	u := &unknownTrigger{}
-	return addTriggerCtx(ctx, u), u
+	return slog.StringValue(c.file + ":" + fmt.Sprint(c.line))
 }
 
 var ErrTriggerDepthExceeded = errors.New("trigger depth exceeded")
@@ -108,9 +131,8 @@ var ErrTriggerDepthExceeded = errors.New("trigger depth exceeded")
 // Manage will apply the state.
 //
 // Multiple request to Manage will be queued.
-func (s *StateManager) Manage(ctx context.Context) (changed bool, err error) {
-	ctx, trigger := triggerCtx(ctx)
-	log := s.log.With("trigger", trigger)
+func (s *StateManager) Manage(ctx context.Context, config ...func(context.Context) context.Context) (changed bool, err error) {
+	ctx = applyCtxTransforms(ctx, append(config, s.withModule(), withTriggerId, withTriggerStack)...)
 	if len(getTriggerStack(ctx)) > maxTriggerDepth(ctx) {
 		err := ErrTriggerDepthExceeded
 		return false, err
@@ -330,12 +352,10 @@ func NewStateManager(state StateApplier) *StateManager {
 		state:          state,
 		lockCh:         make(chan struct{}, 1),
 		priorityLockWg: sync.WaitGroup{},
-		log:            log,
 		postCheckHooks: map[*postCheckHook]struct{}{},
 		preCheckHooks:  map[*preCheckHook]struct{}{},
 		postRunHooks:   map[*postRunHook]struct{}{},
 		postRunWg:      sync.WaitGroup{},
 	}
-	s.log = s.log.WithGroup("StateManager").With("state", s)
 	return s
 }

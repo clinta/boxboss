@@ -3,10 +3,7 @@ package state
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"reflect"
-	"runtime"
 )
 
 type hook struct {
@@ -21,14 +18,16 @@ type hookCtx struct {
 	module   *StateManager
 }
 
-func (h *hookCtx) LogValuer() slog.Value {
+func (h *hookCtx) LogValue() slog.Value {
 	vals := make([]slog.Attr, 0, 3)
-	vals = append(vals, slog.String("type", h.hookType))
-	if h.module != nil {
-		vals = append(vals, slog.String("module", reflect.TypeOf(h.module.state).Name()))
-		vals = append(vals, slog.String("name", h.module.state.Name()))
-	} else if h.hookName != "" {
+	if h.hookType != "" {
+		vals = append(vals, slog.String("type", h.hookType))
+	}
+	if h.hookName != "" {
 		vals = append(vals, slog.String("name", h.hookName))
+	}
+	if h.module != nil {
+		vals = append(vals, slog.Attr{Key: "module", Value: h.module.LogValue()})
 	}
 	return slog.GroupValue(vals...)
 }
@@ -57,11 +56,6 @@ func withHookCtx(hookType string) func(context.Context) context.Context {
 				hookName: "",
 			}
 			ctx = context.WithValue(ctx, hookCtxKey, h)
-		}
-		if h.hookName == "" {
-			if _, file, line, ok := runtime.Caller(2); ok {
-				h.hookName = file + ":" + fmt.Sprint(line)
-			}
 		}
 		if h.hookType == "" {
 			h.hookType = hookType
@@ -315,7 +309,7 @@ func (s *StateManager) AddPostChangesHook(ctx context.Context, f func(ctx contex
 
 func (r *StateManager) logModuleApply(ctx context.Context, log *slog.Logger) (changes bool, err error) {
 	log.DebugContext(ctx, "starting hook")
-	changes, err = r.Manage(ctx)
+	changes, err = r.Manage(ctx, withHookTriggerId)
 	log = log.With("changes", changes)
 	if err != nil {
 		log.ErrorContext(ctx, "hook complete", "err", err)
@@ -338,6 +332,13 @@ func withHookModule(hookType string, r *StateManager) func(context.Context) cont
 			module:   r,
 		})
 	}
+}
+
+func withHookTriggerId(ctx context.Context) context.Context {
+	if h, ok := ctx.Value(hookCtxKey).(*hookCtx); ok {
+		return WithTriggerId(h)(ctx)
+	}
+	return ctx
 }
 
 // Require sets r as a requirement that must be successful before s can be applied

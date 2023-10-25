@@ -3,12 +3,18 @@ package state
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
 )
+
+func init() {
+	SetLogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 func TestPreCheckFail(t *testing.T) {
 	assert := assert.New(t)
