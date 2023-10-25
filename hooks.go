@@ -1,4 +1,4 @@
-package state
+package bossbox
 
 import (
 	"context"
@@ -10,12 +10,12 @@ type hook struct {
 	ctx context.Context
 }
 
-const hookCtxKey stateCtxKey = "hook"
+const hookCtxKey ctxKey = "hook"
 
 type hookCtx struct {
 	hookType string
 	hookName string
-	module   *StateManager
+	module   *Manager
 }
 
 func (h *hookCtx) LogValue() slog.Value {
@@ -109,13 +109,13 @@ func logAndWrapHookErr(ctx context.Context, err error, parentErr error) error {
 // ErrPreCheckHook is returned if a PreCheckHook errors. It will wrap underlying errors.
 var ErrPreCheckHook = errors.New("PreCheck hook error")
 
-// AddPreCheckHook adds a function that is run before the Check step of the State.
+// AddPreCheckHook adds a function that is run before the Check step
 //
 // An error in this hook will propegate to the Apply and prevent Check or Run from running, except for ErrConditionNotMet.
 //
 // If multiple PreCheckHooks are specified, they will run concurrently, and an error from any will cancel the contexts of the
 // remaining PreCheckHooks. The first error will be returned.
-func (s *StateManager) AddPreCheckHook(ctx context.Context, f func(context.Context) error, config ...func(context.Context) context.Context) error {
+func (s *Manager) AddPreCheckHook(ctx context.Context, f func(context.Context) error, config ...func(context.Context) context.Context) error {
 	ctx = applyCtxTransforms(ctx, append(config, withHookCtx("PreCheckHook"), setDoLog)...)
 	unlock, err := s.priorityLock(ctx)
 	defer unlock()
@@ -145,13 +145,13 @@ func (s *StateManager) AddPreCheckHook(ctx context.Context, f func(context.Conte
 	return nil
 }
 
-// ErrConditionNotMet signals that a precheck condition was not met and the state should not run,
+// ErrConditionNotMet signals that a precheck condition was not met and the module should not run,
 // but did not error in an unexpected way.
 //
 // This error is not propegated to Apply, Apply will return nil if a ConditionNotMet is returned from a PreCheckHook.
 var ErrConditionNotMet = errors.New("condition not met")
 
-// ErrCondition is returned by the state when a Condition errors.
+// ErrCondition is returned by the module when a Condition errors.
 //
 // This will wrap the actual error returned by the condition, and will itself be wrapped in an ErrPreCheckHook, because
 // a condition is a PreCheckHook.
@@ -159,11 +159,11 @@ var ErrCondition = errors.New("condition hook error")
 
 // AddCondition adds a function that is a condition to determine whether or not Check should run.
 //
-// If conditionMet returns false, any concurrently running PreCheckHook contexts will be canceled, and the State will
+// If conditionMet returns false, any concurrently running PreCheckHook contexts will be canceled, and the module will
 // not be applied. But Apply will not return an error.
 //
 // AddCondition returns a function that can be used to remove the hook.
-func (s *StateManager) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error), config ...func(context.Context) context.Context) error {
+func (s *Manager) AddCondition(ctx context.Context, f func(context.Context) (conditionMet bool, err error), config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("Condition")
 	cf := func(ctx context.Context) error {
 		ctx = setLog(ctx)
@@ -181,9 +181,9 @@ func (s *StateManager) AddCondition(ctx context.Context, f func(context.Context)
 // ErrPostCheckHook is returned if a PostCheckHook errors causing the Apply to error
 var ErrPostCheckHook = errors.New("PostCheck hook error")
 
-// AddPostCheckHook adds a function that is run after the Check step of the State.
+// AddPostCheckHook adds a function that is run after the Check step
 //
-// This is useful for actions that need to be run in preperation of a state. For example a file management state may neeed
+// This is useful for actions that need to be run in preperation. For example a file management module may neeed
 // A service to be stopped before the file can be managed.
 //
 // An error in this hook will propegate to the Apply and prevent Run from running.
@@ -192,7 +192,7 @@ var ErrPostCheckHook = errors.New("PostCheck hook error")
 // remaining PostCheckHooks. The first error will be returned.
 //
 // AddPostCheckHook returns a function that can be used to remove the hook.
-func (s *StateManager) AddPostCheckHook(ctx context.Context, f func(ctx context.Context, changeNeeded bool) error, config ...func(context.Context) context.Context) error {
+func (s *Manager) AddPostCheckHook(ctx context.Context, f func(ctx context.Context, changeNeeded bool) error, config ...func(context.Context) context.Context) error {
 	ctx = applyCtxTransforms(ctx, append(config, withHookCtx("PostCheckHook"), setDoLog)...)
 	unlock, err := s.priorityLock(ctx)
 	defer unlock()
@@ -221,7 +221,7 @@ func (s *StateManager) AddPostCheckHook(ctx context.Context, f func(ctx context.
 var ErrChangesRequiredFailed = errors.New("changes-required hook error")
 
 // AddChangesRequiredHook adds a function that is run after the check step, only if changes are required.
-func (s *StateManager) AddChangesRequiredHook(ctx context.Context, f func(context.Context) error, config ...func(context.Context) context.Context) error {
+func (s *Manager) AddChangesRequiredHook(ctx context.Context, f func(context.Context) error, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("ChangesRequired")
 	return s.AddPostCheckHook(ctx, func(ctx context.Context, changeNeeded bool) error {
 		if changeNeeded {
@@ -234,13 +234,13 @@ func (s *StateManager) AddChangesRequiredHook(ctx context.Context, f func(contex
 	}, append(config, withHookCtx("ChangesRequired"))...)
 }
 
-// AddPostRunHook adds a function that is run at the end of the state execution. This will run regardless of the source
+// AddPostRunHook adds a function that is run at the end of the execution. This will run regardless of the source
 // of any errors. The function is responsible for checking the type of error.
 //
-// PostRunHooks do not block returning the StateContext result. This means that a subsequent state run could run the PostRunHook before the previous one finished.
+// PostRunHooks do not block returning the result. This means that a subsequent run could run the PostRunHook before the previous one finished.
 //
 // AddPostRunHook returns a function that can be used to remove the hook.
-func (s *StateManager) AddPostRunHook(ctx context.Context, f func(ctx context.Context, changed bool, err error), config ...func(context.Context) context.Context) error {
+func (s *Manager) AddPostRunHook(ctx context.Context, f func(ctx context.Context, changed bool, err error), config ...func(context.Context) context.Context) error {
 	ctx = applyCtxTransforms(ctx, append(config, withHookCtx("PostRunHook"), setDoLog)...)
 	unlock, err := s.priorityLock(ctx)
 	defer unlock()
@@ -268,8 +268,8 @@ func (s *StateManager) AddPostRunHook(ctx context.Context, f func(ctx context.Co
 	return nil
 }
 
-// AddPostSuccessHook adds a PostRunHook that is run after a successful state run.
-func (s *StateManager) AddPostSuccessHook(ctx context.Context, f func(ctx context.Context, changes bool), config ...func(context.Context) context.Context) error {
+// AddPostSuccessHook adds a PostRunHook that is run after a successful module run.
+func (s *Manager) AddPostSuccessHook(ctx context.Context, f func(ctx context.Context, changes bool), config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("PostSuccess")
 	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err == nil {
@@ -281,8 +281,8 @@ func (s *StateManager) AddPostSuccessHook(ctx context.Context, f func(ctx contex
 	}, append(config, withHookCtx("PostSuccess"))...)
 }
 
-// AddPostErrorHook adds a PostRunHook that is run after a state run errors.
-func (s *StateManager) AddPostErrorHook(ctx context.Context, f func(ctx context.Context, err error), config ...func(context.Context) context.Context) error {
+// AddPostErrorHook adds a PostRunHook that is run after a module run errors.
+func (s *Manager) AddPostErrorHook(ctx context.Context, f func(ctx context.Context, err error), config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("PostFailure")
 	return s.AddPostRunHook(ctx, func(ctx context.Context, changes bool, err error) {
 		if err != nil && !errors.Is(err, ErrConditionNotMet) {
@@ -294,8 +294,8 @@ func (s *StateManager) AddPostErrorHook(ctx context.Context, f func(ctx context.
 	}, append(config, withHookCtx("PostFailure"))...)
 }
 
-// AddPostChangesHook adds a PostRunHook that is run after a successful state run that made changes.
-func (s *StateManager) AddPostChangesHook(ctx context.Context, f func(ctx context.Context), config ...func(context.Context) context.Context) error {
+// AddPostChangesHook adds a PostRunHook that is run after a successful module run that made changes.
+func (s *Manager) AddPostChangesHook(ctx context.Context, f func(ctx context.Context), config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("PostChanges")
 	return s.AddPostSuccessHook(ctx, func(ctx context.Context, changes bool) {
 		if changes {
@@ -307,7 +307,7 @@ func (s *StateManager) AddPostChangesHook(ctx context.Context, f func(ctx contex
 	}, append(config, withHookCtx("PostChanges"))...)
 }
 
-func (r *StateManager) logModuleApply(ctx context.Context, log *slog.Logger) (changes bool, err error) {
+func (r *Manager) logModuleApply(ctx context.Context, log *slog.Logger) (changes bool, err error) {
 	log.DebugContext(ctx, "starting hook")
 	changes, err = r.Manage(ctx, withHookTriggerId)
 	log = log.With("changes", changes)
@@ -319,7 +319,7 @@ func (r *StateManager) logModuleApply(ctx context.Context, log *slog.Logger) (ch
 	return changes, err
 }
 
-func withHookModule(hookType string, r *StateManager) func(context.Context) context.Context {
+func withHookModule(hookType string, r *Manager) func(context.Context) context.Context {
 	return func(ctx context.Context) context.Context {
 		if h, ok := ctx.Value(hookCtxKey).(*hookCtx); ok {
 			h.module = r
@@ -342,7 +342,7 @@ func withHookTriggerId(ctx context.Context) context.Context {
 }
 
 // Require sets r as a requirement that must be successful before s can be applied
-func (s *StateManager) Require(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) Require(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("Require")
 	return s.AddPreCheckHook(ctx, func(ctx context.Context) error {
 		ctx = setLog(ctx)
@@ -352,7 +352,7 @@ func (s *StateManager) Require(ctx context.Context, r *StateManager, config ...f
 }
 
 // RequireChanges sets r as a condition and only runs s if r made changes
-func (s *StateManager) RequireChanges(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) RequireChanges(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("RequireChanges")
 	return s.AddCondition(ctx, func(ctx context.Context) (bool, error) {
 		ctx = setLog(ctx)
@@ -362,7 +362,7 @@ func (s *StateManager) RequireChanges(ctx context.Context, r *StateManager, conf
 }
 
 // ChangesRequire requires r as a requirement that runs only if changes are indicated by s.Check
-func (s *StateManager) ChangesRequire(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) ChangesRequire(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("ChangesRequire")
 	return s.AddChangesRequiredHook(ctx,
 		func(ctx context.Context) error {
@@ -373,7 +373,7 @@ func (s *StateManager) ChangesRequire(ctx context.Context, r *StateManager, conf
 }
 
 // Triggers triggers r anytime s is run (regardless of success or changes)
-func (s *StateManager) Triggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) Triggers(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("Triggers")
 	return s.AddPostRunHook(ctx, func(ctx context.Context, _ bool, _ error) {
 		ctx = setLog(ctx)
@@ -382,7 +382,7 @@ func (s *StateManager) Triggers(ctx context.Context, r *StateManager, config ...
 }
 
 // SuccessTriggers triggers r when s.Apply is successful
-func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) SuccessTriggers(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("SuccessTriggers")
 	return s.AddPostSuccessHook(ctx, func(ctx context.Context, _ bool) {
 		ctx = setLog(ctx)
@@ -391,7 +391,7 @@ func (s *StateManager) SuccessTriggers(ctx context.Context, r *StateManager, con
 }
 
 // ChangesTriggers triggers r anytime s successfully makes changes
-func (s *StateManager) ChangesTriggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) ChangesTriggers(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("ChangesTriggers")
 	return s.AddPostChangesHook(ctx, func(ctx context.Context) {
 		ctx = setLog(ctx)
@@ -400,35 +400,10 @@ func (s *StateManager) ChangesTriggers(ctx context.Context, r *StateManager, con
 }
 
 // ErrorTriggers triggers r anytime s errors
-func (s *StateManager) ErrorTriggers(ctx context.Context, r *StateManager, config ...func(context.Context) context.Context) error {
+func (s *Manager) ErrorTriggers(ctx context.Context, r *Manager, config ...func(context.Context) context.Context) error {
 	setLog := logForHookType("ErrorTriggers")
 	return s.AddPostErrorHook(ctx, func(ctx context.Context, _ error) {
 		ctx = setLog(ctx)
 		_, _ = r.logModuleApply(ctx, log)
 	}, append(config, withHookModule("ErrorTriggers", r))...)
 }
-
-/*
-// conflictsWith prevents s and r from running at the same time
-func (s *StateManager) conflictsWith(ctx context.Context, r *StateManager) error {
-	ctx, log := s.hookedModuleLog(ctx, r, "conflicts-with")
-	return s.AddPreCheckHook(ctx, func(ctx context.Context) error {
-		log.Debug().Msg("waiting on conflicting module")
-		err := r.Wait(ctx)
-		log.Debug().Msg("done waiting on conflicting module")
-		return err
-	})
-}
-
-// ConflictsWith prevents s and r from running at the same time
-func (s *StateManager) ConflictsWith(ctx context.Context, r *StateManager) error {
-	// Note: This should not race
-	// while s is waiting on r, s is already locked, so r cannot start again after r finishes until s finishes
-	// TODO: This could deadlock, what to do?
-	err := s.conflictsWith(ctx, r)
-	if err != nil {
-		return err
-	}
-	return r.conflictsWith(ctx, s)
-}
-*/

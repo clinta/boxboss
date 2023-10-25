@@ -1,4 +1,4 @@
-package state
+package bossbox
 
 import (
 	"context"
@@ -19,7 +19,7 @@ type testState struct {
 	retRunErr       error
 }
 
-func newTestRunner() (context.Context, func(), *testState, *StateManager) {
+func newTestRunner() (context.Context, func(), *testState, *Manager) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &testState{}
 	t.State = NewState("testState",

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"git.clinta.me/clinta/boxboss/state"
+	bossbox "git.clinta.me/clinta/boxboss"
 	"golang.org/x/sys/unix"
 )
 
@@ -70,7 +70,7 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 		err := os.Remove(tmpFileName)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// TODO logging is a mess
-			state.Log().ErrorContext(ctx, "error removing temp file", "err", err)
+			bossbox.Log().ErrorContext(ctx, "error removing temp file", "err", err)
 		}
 	})
 

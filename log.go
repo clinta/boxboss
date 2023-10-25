@@ -1,30 +1,30 @@
-package state
+package bossbox
 
 import (
 	"context"
 	"log/slog"
 )
 
-type stateLogHandler struct {
+type logHandler struct {
 	handler slog.Handler
 }
 
 func SetLogHandler(handler slog.Handler) {
-	logHandler.handler = handler
+	bbLogHandler.handler = handler
 }
 
-var logHandler *stateLogHandler = &stateLogHandler{handler: slog.Default().Handler()}
+var bbLogHandler *logHandler = &logHandler{handler: slog.Default().Handler()}
 
-var logKeys = [...]stateCtxKey{moduleCtxKey, triggerIdCtxKey, hookCtxKey}
+var logKeys = [...]ctxKey{moduleCtxKey, triggerIdCtxKey, hookCtxKey}
 
-func (h *stateLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (h *logHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	if noLog, ok := ctx.Value(logFlagDoNotLog).(bool); ok && noLog {
 		return false
 	}
 	return h.handler.Enabled(ctx, level)
 }
 
-func (h *stateLogHandler) Handle(ctx context.Context, record slog.Record) error {
+func (h *logHandler) Handle(ctx context.Context, record slog.Record) error {
 	for _, k := range logKeys {
 		if v, ok := ctx.Value(k).(slog.LogValuer); ok {
 			record.AddAttrs(slog.Attr{Key: string(k), Value: v.LogValue()})
@@ -33,24 +33,24 @@ func (h *stateLogHandler) Handle(ctx context.Context, record slog.Record) error 
 	return h.handler.Handle(ctx, record)
 }
 
-func (h *stateLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (h *logHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return h.handler.WithAttrs(attrs)
 }
 
-func (h *stateLogHandler) WithGroup(name string) slog.Handler {
+func (h *logHandler) WithGroup(name string) slog.Handler {
 	return h.handler.WithGroup(name)
 }
 
-var log *slog.Logger = slog.New(logHandler)
+var log *slog.Logger = slog.New(bbLogHandler)
 
 func Log() *slog.Logger {
 	return log
 }
 
-type stateLogCtxFlag uint
+type logCtxFlag uint
 
 const (
-	logFlagDoNotLog stateLogCtxFlag = iota
+	logFlagDoNotLog logCtxFlag = iota
 )
 
 func applyCtxTransforms(ctx context.Context, transforms ...func(context.Context) context.Context) context.Context {

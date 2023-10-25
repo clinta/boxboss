@@ -1,10 +1,11 @@
-package state
+package bossbox
 
 import "context"
 
-// StateApplier interface is the interface that a state module must implement.
-type StateApplier interface {
-	// Name is a name identifying the state, used in logging.
+// Module interface is the interface that a module must implement.
+type Module interface {
+	// Name is a name identifying the module, used in logging. The type is logged independently. So this should uniquely identify this instance.
+	// For example, a file module should use the name of the file being managed.
 	Name() string
 
 	// Check reports whether changes are required. If no changes are required, Apply will not be called by the StateRunner.
@@ -18,11 +19,11 @@ type StateApplier interface {
 	// A warning will be logged if Check indicated changes were required, but Apply reports no changes were made.
 	Apply(context.Context) (bool, error)
 
-	// Manage returns a StateManager for this state
-	Manage() *StateManager
+	// Manage returns a Manager for this module
+	Manage() *Manager
 }
 
-// State is a simple implementation of the StateApplier interface.
+// State is a simple implementation of the Module interface.
 type State struct {
 	name  string
 	check func(context.Context) (bool, error)
@@ -41,8 +42,8 @@ func (s *State) Apply(ctx context.Context) (bool, error) {
 	return s.run(ctx)
 }
 
-func (s *State) Manage() *StateManager {
-	return NewStateManager(s)
+func (s *State) Manage() *Manager {
+	return NewManager(s)
 }
 
 func NewState(name string, check func(context.Context) (bool, error), run func(context.Context) (bool, error)) *State {

@@ -1,5 +1,5 @@
-// Package state includes the state interface which should be implemented by plugins, and StateRunner which manages a state
-package state
+// package bossbox includes the Module interface which should be implemented by plugins, and Manager which manages a module and it's hooks
+package bossbox
 
 import (
 	"context"
@@ -13,13 +13,13 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var ErrCheckFailed = errors.New("state check failed")
-var ErrApplyFailed = errors.New("state apply failed")
+var ErrCheckFailed = errors.New("check failed")
+var ErrApplyFailed = errors.New("apply failed")
 
-// StateManager launches a goroutine to accept addition and removal of hooks, and applies the state whenever Manage is called.
-// A StateManager is safe for concurrent use by multiple goroutines.
-type StateManager struct {
-	state          StateApplier
+// Manager launches a goroutine to accept addition and removal of hooks, and applies the module whenever Manage is called.
+// A Manager is safe for concurrent use by multiple goroutines.
+type Manager struct {
+	module         Module
 	lockCh         chan struct{}
 	priorityLockWg sync.WaitGroup
 	postCheckHooks map[*postCheckHook]struct{}
@@ -28,20 +28,20 @@ type StateManager struct {
 	postRunWg      sync.WaitGroup
 }
 
-func (s *StateManager) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("type", reflect.TypeOf(s.state).String()), slog.String("name", s.state.Name()))
+func (s *Manager) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("type", reflect.TypeOf(s.module).String()), slog.String("name", s.module.Name()))
 }
 
-type stateCtxKey string
+type ctxKey string
 
-const triggerStackKey stateCtxKey = "trigger-stack"
+const triggerStackKey ctxKey = "trigger-stack"
 
 const defaultMaxTriggerDepth int = 10
-const maxTriggerDepthCtxKey stateCtxKey = "max-trigger-depth"
+const maxTriggerDepthCtxKey ctxKey = "max-trigger-depth"
 
-const triggerIdCtxKey stateCtxKey = "trigger"
+const triggerIdCtxKey ctxKey = "trigger"
 
-const moduleCtxKey stateCtxKey = "module"
+const moduleCtxKey ctxKey = "module"
 
 // WithMaxTriggerDepth sets the maximum trigger depth allowed in this context.
 // If a hook from one Manage() calls another Manage(), this will increase the trigger depth by one.
@@ -60,7 +60,7 @@ func maxTriggerDepth(ctx context.Context) int {
 }
 
 // WithTriggerId will return a context with an identifier for the trigger that is used to trigger
-// a StateManager.Manage(), useful for logging state calls
+// a Manager.Manage(), useful for logging
 func WithTriggerId(trigger slog.LogValuer) func(context.Context) context.Context {
 	return func(ctx context.Context) context.Context {
 		return context.WithValue(ctx, triggerIdCtxKey, trigger)
@@ -105,7 +105,7 @@ func withTriggerStack(ctx context.Context) context.Context {
 	return context.WithValue(ctx, triggerStackKey, stack)
 }
 
-func (s *StateManager) withModule() func(context.Context) context.Context {
+func (s *Manager) withModule() func(context.Context) context.Context {
 	return func(ctx context.Context) context.Context {
 		return context.WithValue(ctx, moduleCtxKey, s)
 	}
@@ -128,10 +128,10 @@ func (c *caller) LogValue() slog.Value {
 
 var ErrTriggerDepthExceeded = errors.New("trigger depth exceeded")
 
-// Manage will apply the state.
+// Manage will apply the module.
 //
 // Multiple request to Manage will be queued.
-func (s *StateManager) Manage(ctx context.Context, config ...func(context.Context) context.Context) (changed bool, err error) {
+func (s *Manager) Manage(ctx context.Context, config ...func(context.Context) context.Context) (changed bool, err error) {
 	ctx = applyCtxTransforms(ctx, append(config, s.withModule(), withTriggerId, withTriggerStack)...)
 	if len(getTriggerStack(ctx)) > maxTriggerDepth(ctx) {
 		err := ErrTriggerDepthExceeded
@@ -148,14 +148,14 @@ func (s *StateManager) Manage(ctx context.Context, config ...func(context.Contex
 	return s.runTrigger(ctx, log)
 }
 
-// ErrStateNotRun indicates that the Runner has not been Applied.
-var ErrStateNotRun = errors.New("state has not yet run")
+// ErrNotRun indicates that the Runner has not been Applied.
+var ErrNotRun = errors.New("module has not yet run")
 
 var checkChangesButNoRunChanges = "check indicated changes were required, but run did not report changes"
 
-func (s *StateManager) runTrigger(ctx context.Context, log *slog.Logger) (bool, error) {
+func (s *Manager) runTrigger(ctx context.Context, log *slog.Logger) (bool, error) {
 	runCtx, runDone := context.WithCancel(ctx)
-	changed, err := s.runState(runCtx, log)
+	changed, err := s.runModule(runCtx, log)
 	s.postRunWg.Add(1)
 	{
 		if len(s.postRunHooks) > 0 {
@@ -178,7 +178,7 @@ func (s *StateManager) runTrigger(ctx context.Context, log *slog.Logger) (bool, 
 	return changed, err
 }
 
-func (s *StateManager) runState(ctx context.Context, log *slog.Logger) (bool, error) {
+func (s *Manager) runModule(ctx context.Context, log *slog.Logger) (bool, error) {
 	{
 		if len(s.preCheckHooks) > 0 {
 			log.DebugContext(ctx, "running PreCheckHooks", "numHooks", len(s.preCheckHooks))
@@ -200,7 +200,7 @@ func (s *StateManager) runState(ctx context.Context, log *slog.Logger) (bool, er
 	}
 
 	log.DebugContext(ctx, "running check")
-	changeNeeded, err := s.state.Check(ctx)
+	changeNeeded, err := s.module.Check(ctx)
 	if err != nil {
 		return false, errors.Join(ErrCheckFailed, err)
 	}
@@ -228,8 +228,8 @@ func (s *StateManager) runState(ctx context.Context, log *slog.Logger) (bool, er
 		return false, err
 	}
 
-	log.DebugContext(ctx, "applying state")
-	changed, err := s.state.Apply(ctx)
+	log.DebugContext(ctx, "applying")
+	changed, err := s.module.Apply(ctx)
 	if err != nil {
 		err = errors.Join(ErrApplyFailed, err)
 	}
@@ -241,7 +241,7 @@ func (s *StateManager) runState(ctx context.Context, log *slog.Logger) (bool, er
 	return changed, err
 }
 
-func (s *StateManager) lock(ctx context.Context) (unlock func(), err error) {
+func (s *Manager) lock(ctx context.Context) (unlock func(), err error) {
 	s.priorityLockWg.Wait()
 	select {
 	case s.lockCh <- struct{}{}:
@@ -253,7 +253,7 @@ func (s *StateManager) lock(ctx context.Context) (unlock func(), err error) {
 	}
 }
 
-func (s *StateManager) priorityLock(ctx context.Context) (unlock func(), err error) {
+func (s *Manager) priorityLock(ctx context.Context) (unlock func(), err error) {
 	s.priorityLockWg.Add(1)
 	defer s.priorityLockWg.Done()
 	select {
@@ -266,8 +266,8 @@ func (s *StateManager) priorityLock(ctx context.Context) (unlock func(), err err
 	}
 }
 
-// Wait will block until any hook addition or removals, or state applications are complete
-func (s *StateManager) Wait(ctx context.Context) error {
+// Wait will block until any hook addition or removals, or applications are complete
+func (s *Manager) Wait(ctx context.Context) error {
 	unlock, err := s.lock(ctx)
 	if err != nil {
 		unlock()
@@ -285,8 +285,8 @@ func (s *StateManager) Wait(ctx context.Context) error {
 	return nil
 }
 
-// WaitAll waits for hook additions or removals, state applications, and any currently running post-run hooks
-func (s *StateManager) WaitAll(ctx context.Context) error {
+// WaitAll waits for hook additions or removals, applications, and any currently running post-run hooks
+func (s *Manager) WaitAll(ctx context.Context) error {
 	unlock, err := s.lock(ctx)
 	defer unlock()
 	if err != nil {
@@ -317,7 +317,7 @@ func (s *StateManager) WaitAll(ctx context.Context) error {
 }
 
 // outer func needs to lock before calling this
-func (s *StateManager) checkRemovedHooks(ctx context.Context) bool {
+func (s *Manager) checkRemovedHooks(ctx context.Context) bool {
 	for h := range s.preCheckHooks {
 		select {
 		case <-h.ctx.Done():
@@ -342,13 +342,13 @@ func (s *StateManager) checkRemovedHooks(ctx context.Context) bool {
 	return false
 }
 
-// NewStateManager creates the state runner that will run, listening for triggers from Apply until ctx is canceled.
+// NewManager creates the runner that will run, listening for triggers from Apply until ctx is canceled.
 //
-// It will run until ctx is canceled. Attempting to use the StateRunner after context is canceled will likely
+// It will run until ctx is canceled. Attempting to use the Manager after context is canceled will likely
 // cause deadlocks.
-func NewStateManager(state StateApplier) *StateManager {
-	s := &StateManager{
-		state:          state,
+func NewManager(module Module) *Manager {
+	s := &Manager{
+		module:         module,
 		lockCh:         make(chan struct{}, 1),
 		priorityLockWg: sync.WaitGroup{},
 		postCheckHooks: map[*postCheckHook]struct{}{},
