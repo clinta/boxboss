@@ -193,7 +193,6 @@ func (s *StateManager) runState(ctx context.Context, log *slog.Logger) (bool, er
 		err := eg.Wait()
 		if err != nil {
 			if errors.Is(err, ErrConditionNotMet) {
-				log.DebugContext(ctx, "condition not met")
 				return false, nil
 			}
 			return false, err
