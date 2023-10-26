@@ -1,4 +1,4 @@
-module git.clinta.me/clinta/boxboss
+module github.com/clinta/boxboss
 
 go 1.21.0
 

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	bossbox "git.clinta.me/clinta/boxboss"
+	bossbox "github.com/clinta/boxboss"
 	"golang.org/x/sys/unix"
 )
 
