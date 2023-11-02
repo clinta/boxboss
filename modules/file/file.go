@@ -20,13 +20,13 @@ const DefaultBackupLocation = "/var/lib/bossbox/file_backups"
 
 type File struct {
 	path           string
-	contents       func() io.ReadCloser
+	contents       func() (io.ReadCloser, error)
 	backupLocation string
 	tmpFile        chan *tmpFileRes
 	// TODO: File mode module
 }
 
-func NewFile(path string, contents func() io.ReadCloser) File {
+func NewFile(path string, contents func() (io.ReadCloser, error)) File {
 	f := File{
 		path:           path,
 		contents:       contents,
@@ -74,7 +74,10 @@ func (f *File) Check(ctx context.Context) (bool, error) {
 		}
 	})
 
-	contents := f.contents()
+	contents, err := f.contents()
+	if err != nil {
+		return false, err
+	}
 	reader := io.TeeReader(contents, tmpFile)
 
 	eq, err := readersEqual(ctx, reader, dst)
